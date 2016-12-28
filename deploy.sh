@@ -1,2 +1,3 @@
-cp ./.vimrc ~/.vimrc
-cp ./.gitconfig ~/.gitconfig
+cp .ssh/* ~/.ssh
+cp .gitconfig ~/
+cp .vimrc ~/
