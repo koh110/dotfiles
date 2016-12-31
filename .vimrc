@@ -1,3 +1,5 @@
+syntax on
+
 "行番号表示
 set number
 "ファイル名表示
