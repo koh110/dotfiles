@@ -1,13 +1,16 @@
 # 補完
 autoload -U compinit
 compinit
-# 小文字/大文字両方補完
+## 小文字/大文字両方補完
 zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
-# sudo の後ろでコマンド名を補完する
+## sudo の後ろでコマンド名を補完する
 zstyle ':completion:*:sudo:*' command-path /usr/local/sbin /usr/local/bin \
                    /usr/sbin /usr/bin /sbin /bin /usr/X11R6/bin
-# ps コマンドのプロセス名補完
+## ps コマンドのプロセス名補完
 zstyle ':completion:*:processes' command 'ps x -o pid,s,args'
+## 
+bindkey '^P' history-beginning-search-backward
+bindkey '^N' history-beginning-search-forward
 
 # 色
 autoload -Uz colors
