@@ -4,3 +4,4 @@ cp .vimrc ~/
 cp .tmux.conf ~/
 cp .zshrc ~/
 cp .zshenv ~/
+cp .atom ~/
