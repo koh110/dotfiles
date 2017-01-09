@@ -1,0 +1,1 @@
+apm list -bi > atomfile
