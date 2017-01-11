@@ -16,6 +16,23 @@ bindkey '^N' history-beginning-search-forward
 autoload -Uz colors
 colors
 
+# ls
+export LSCOLORS=gxfxcxdxbxegedabagacag
+export LS_COLORS='di=36;40:ln=35;40:so=32;40:pi=33;40:ex=31;40:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=30;46'
+
+zstyle ':completion:*:default' list-colors ${(s.:.)LS_COLORS}
+# lsがカラー表示になるようエイリアスを設定
+case "${OSTYPE}" in
+darwin*)
+  # Mac
+  alias ls="ls -GF"
+  ;;
+linux*)
+  # Linux
+  alias ls='ls -F --color'
+  ;;
+esac
+
 # history
 HISTFILE=~/.zsh_history
 HISTSIZE=1000000
@@ -26,17 +43,24 @@ setopt hist_ignore_all_dups
 setopt hist_reduce_blanks
 
 # prompt
-PROMPT="%{${fg[yellow]}%}%/%{${reset_color}%} 
-[%n]$ "
+PROMPT="%~ 
+%(?.%F{green}${1:- ❯}%f.%F{red}${1:- ❯}%f) "
+
+## git
 autoload -Uz vcs_info
 zstyle ':vcs_info:*' formats '(%s)-[%b]'
-zstyle ':vcs_info:*' actionformats '(%s)-[%b|%a]'
+zstyle ':vcs_info:*' actionformats '(%s)-[%b]' '%c%u %m' '<!%a>'
 precmd () {
     psvar=()
     LANG=en_US.UTF-8 vcs_info
     [[ -n "$vcs_info_msg_0_" ]] && psvar[1]="$vcs_info_msg_0_"
 }
 RPROMPT="%1(v|%F{green}%1v%f|)"
+
+# alias
+## 色一覧
+alias zcolor='for c in {000..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($c%16)) -eq 15 ] && echo;done;echo'
+alias zcolora='for c in {016..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($((c-16))%6)) -eq 5 ] && echo;done;echo'
 
 
 # tmux
