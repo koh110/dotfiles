@@ -43,8 +43,8 @@ setopt hist_ignore_all_dups
 setopt hist_reduce_blanks
 
 # prompt
-PROMPT="%~ 
-%(?.%F{green}${1:- ❯}%f.%F{red}${1:- ❯}%f) "
+PROMPT="%F{cyan}%~ %f
+ %(?.%F{green}${1:- ❯}%f.%F{red}${1:- ❯}%f) "
 
 ## git
 autoload -Uz vcs_info
