@@ -1,8 +1,17 @@
-# cp .ssh/* ~/.ssh
+#!/bin/bash
+
+mkdir -p ~/.ssh
+if [ ! -e ~/.ssh/config ]; then
+  cp .ssh/config ~/.ssh/config
+fi
+
 cp .gitconfig ~/
-cp .vimrc ~/
 cp .tmux.conf ~/
 cp .zshrc ~/
 cp .zshenv ~/
-cp .atom ~/
+
+cp -r .atom ~/
 apm install --packages-file atomfile
+
+cp .vim ~/
+cp .vimrc ~/
