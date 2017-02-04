@@ -126,3 +126,14 @@ function tmux_automatically_attach_session()
 }
 tmux_automatically_attach_session
 
+# nvmのlazy load
+nvm() {
+    # まず仮の nvm コマンドを unset
+    unset -f nvm
+
+    # nvm.sh をロード
+    source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+
+    # 仮の nvm コマンドに渡された引数を本物に受け渡す
+    nvm "$@"
+}
