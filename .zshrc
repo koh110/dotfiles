@@ -8,7 +8,7 @@ zstyle ':completion:*:sudo:*' command-path /usr/local/sbin /usr/local/bin \
                    /usr/sbin /usr/bin /sbin /bin /usr/X11R6/bin
 ## ps コマンドのプロセス名補完
 zstyle ':completion:*:processes' command 'ps x -o pid,s,args'
-## 
+##
 bindkey '^P' history-beginning-search-backward
 bindkey '^N' history-beginning-search-forward
 
@@ -37,31 +37,60 @@ esac
 HISTFILE=~/.zsh_history
 HISTSIZE=1000000
 SAVEHIST=1000000
-# 同じコマンドをヒストリに残さない
-setopt hist_ignore_all_dups
-# ヒストリに保存するときに余分なスペースを削除する
-setopt hist_reduce_blanks
 
 # prompt
-PROMPT="%F{cyan}%~ %f
- %(?.%F{green}${1:- ❯}%f.%F{red}${1:- ❯}%f) "
-
-## git
 autoload -Uz vcs_info
-zstyle ':vcs_info:*' formats '(%s)-[%b]'
-zstyle ':vcs_info:*' actionformats '(%s)-[%b]' '%c%u %m' '<!%a>'
+zstyle ':vcs_info:*' formats '%F{green}(%s)-[%b]%f'
+zstyle ':vcs_info:*' actionformats '%F{green}(%s)-[%b|%a]%f'
+autoload -Uz is-at-least
+if is-at-least 4.3.10; then
+  zstyle ':vcs_info:git:*' check-for-changes true
+  zstyle ':vcs_info:git:*' stagedstr     '*'  # Changes to be committed
+  zstyle ':vcs_info:git:*' unstagedstr   '*'  # Changes not staged for commit
+  zstyle ':vcs_info:git:*' formats       '%F{green}(%s)-[%b]%f %F{magenta}%c%u%f'
+  zstyle ':vcs_info:git:*' actionformats '%F{green}(%s)-[%b|%a]%f %F{magenta}%c%u%f'
+fi
 precmd () {
     psvar=()
     LANG=en_US.UTF-8 vcs_info
-    [[ -n "$vcs_info_msg_0_" ]] && psvar[1]="$vcs_info_msg_0_"
+    psvar[1]="$vcs_info_msg_0_"
 }
-RPROMPT="%1(v|%F{green}%1v%f|)"
+PROMPT=$'%{${fg_bold[red]}%}${USER}@${HOST}%{${reset_color}%} %{${fg[blue]}%}%~%{${reset_color}%} %1(v|$psvar[1]|)\n%(!.#.$) '
 
 # alias
 ## 色一覧
 alias zcolor='for c in {000..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($c%16)) -eq 15 ] && echo;done;echo'
 alias zcolora='for c in {016..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($((c-16))%6)) -eq 5 ] && echo;done;echo'
 
+# zsh options
+setopt auto_cd              # ディレクトリのみで移動
+setopt extended_history     # 履歴に開始時刻と経過時間を記録
+setopt long_list_jobs       # 内部コマンド jobs の出力をデフォルトで jobs -L にする
+setopt auto_resume          # サスペンド中のプロセスと同じコマンド名を実行した場合はリジューム
+setopt hist_ignore_all_dups # 重複するコマンド行は古い方を削除
+setopt pushd_silent         # pushd, popdの度にディレクトリスタックの中身を表示しない
+setopt auto_pushd           # 普通に cd するときにもディレクトリスタックにそのディレクトリを入れる
+setopt extended_glob        # 拡張グロブを有効にする
+setopt print_eight_bit      # 日本語のファイル名を表示可能
+setopt prompt_subst         # プロンプトに escape sequence (環境変数) を通す
+setopt pushd_ignore_dups    # ディレクトリスタックに重複する物は古い方を削除
+setopt numeric_glob_sort    # 数字を数値と解釈してソートする
+setopt list_types           # 補完候補一覧でファイルの種別を識別マーク表示
+setopt auto_remove_slash    # 補完で末尾に補われた / を自動的に削除
+setopt always_last_prompt   # カーソル位置は保持したままファイル名一覧を順次その場で表示
+setopt hist_ignore_space    # スペースで始まるコマンド行はヒストリリストから削除
+setopt no_beep              # コマンド入力エラーでBeepを鳴らさない
+setopt share_history        # 履歴の共有
+setopt hist_reduce_blanks   # 余分な空白は詰めて記録
+setopt no_hup               # ログアウト時にバックグラウンドジョブをkillしない
+setopt complete_in_word     # 単語の途中でもカーソル位置を元に補完可能
+setopt braceccl             # 文字列のブレース展開 {A-Z}
+setopt bang_hist            # !を使ったヒストリ展開を行う
+setopt pushd_minus          # スタック上のディレクトリを特定するときの'-'と'+'の意味を逆にする
+setopt rcquotes             # ダブルシングルクオートでシングルクオートをエスケープする
+setopt prompt_subst         # プロンプトの変数展開を毎回行う
+unsetopt cdable_vars        # $HOMEを先頭に'~'を付けたもので展開する
+unsetopt auto_param_slash   # ディレクトリ名の補完で末尾の / を自動的に付加し、次の補完に備える
 
 # tmux
 function is_exists() { type "$1" >/dev/null 2>&1; return $?; }
