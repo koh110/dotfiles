@@ -1,0 +1,5 @@
+dbaeumer.vscode-eslint
+leizongmin.node-module-intellisense
+sysoev.language-stylus
+vscodevim.vim
+xabikos.JavaScriptSnippets

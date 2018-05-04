@@ -1,0 +1,9 @@
+{
+    "window.zoomLevel": 1,
+    "editor.renderWhitespace": "boundary",
+    "[javascript]": {
+        "editor.tabSize": 2
+    },
+    "javascript.suggestionActions.enabled": false,
+    "emmet.triggerExpansionOnTab": true
+}
