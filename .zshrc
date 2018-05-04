@@ -2,7 +2,7 @@
 autoload -U compinit
 compinit
 ## 小文字/大文字両方補完
-zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
+#zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
 ## sudo の後ろでコマンド名を補完する
 zstyle ':completion:*:sudo:*' command-path /usr/local/sbin /usr/local/bin \
                    /usr/sbin /usr/bin /sbin /bin /usr/X11R6/bin
@@ -166,3 +166,5 @@ nvm() {
     # 仮の nvm コマンドに渡された引数を本物に受け渡す
     nvm "$@"
 }
+
+test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
