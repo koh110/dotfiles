@@ -61,6 +61,7 @@ PROMPT=$'%{${fg_bold[red]}%}${USER}@${HOST}%{${reset_color}%} %{${fg[blue]}%}%~%
 ## 色一覧
 alias zcolor='for c in {000..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($c%16)) -eq 15 ] && echo;done;echo'
 alias zcolora='for c in {016..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($((c-16))%6)) -eq 5 ] && echo;done;echo'
+alias json="node -e 'd=\"\";process.stdin.resume();process.stdin.on(\"data\",c => d+=c);process.stdin.on(\"end\", () => console.dir(JSON.parse(d), {colors:true,depth:5}))'"
 
 # zsh options
 setopt auto_cd              # ディレクトリのみで移動
