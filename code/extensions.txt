@@ -1,5 +1,9 @@
+azemoh.one-monokai
+CoenraadS.bracket-pair-colorizer
 dbaeumer.vscode-eslint
+jpoissonnier.vscode-styled-components
 leizongmin.node-module-intellisense
+PeterJausovec.vscode-docker
 sysoev.language-stylus
 vscodevim.vim
 xabikos.JavaScriptSnippets

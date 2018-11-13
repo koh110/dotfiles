@@ -5,5 +5,13 @@
         "editor.tabSize": 2
     },
     "javascript.suggestionActions.enabled": false,
-    "emmet.triggerExpansionOnTab": true
+    "emmet.triggerExpansionOnTab": true,
+    "emmet.includeLanguages": {
+        "javascript": "javascriptreact"
+    },
+    "emmet.syntaxProfiles": {
+        "javascript": "html"
+    },
+    "editor.multiCursorModifier": "ctrlCmd",
+    "workbench.colorTheme": "One Monokai"
 }
