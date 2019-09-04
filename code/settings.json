@@ -1,17 +1,35 @@
 {
-    "window.zoomLevel": 1,
-    "editor.renderWhitespace": "boundary",
-    "[javascript]": {
-        "editor.tabSize": 2
+  "window.zoomLevel": 1,
+  "editor.renderWhitespace": "boundary",
+  "editor.tabSize": 2,
+  "[javascript]": {
+    "editor.tabSize": 2
+  },
+  "javascript.suggestionActions.enabled": false,
+  "emmet.triggerExpansionOnTab": true,
+  "emmet.includeLanguages": {
+    "javascript": "javascriptreact"
+  },
+  "emmet.syntaxProfiles": {
+    "javascript": "html"
+  },
+  "editor.multiCursorModifier": "ctrlCmd",
+  "workbench.colorTheme": "One Monokai",
+  "editor.formatOnPaste": false,
+  "editor.formatOnSave": false,
+  "editor.formatOnType": false,
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    {
+      "language": "typescript"
     },
-    "javascript.suggestionActions.enabled": false,
-    "emmet.triggerExpansionOnTab": true,
-    "emmet.includeLanguages": {
-        "javascript": "javascriptreact"
-    },
-    "emmet.syntaxProfiles": {
-        "javascript": "html"
-    },
-    "editor.multiCursorModifier": "ctrlCmd",
-    "workbench.colorTheme": "One Monokai"
+    {
+      "language": "typescriptreact"
+    }
+  ],
+  "[typescriptreact]": {
+    "editor.tabSize": 2
+  },
+  "typescript.tsc.autoDetect": "off"
 }

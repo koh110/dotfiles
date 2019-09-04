@@ -1,9 +1,11 @@
 azemoh.one-monokai
 CoenraadS.bracket-pair-colorizer
 dbaeumer.vscode-eslint
+esbenp.prettier-vscode
 jpoissonnier.vscode-styled-components
 leizongmin.node-module-intellisense
-PeterJausovec.vscode-docker
+ms-azuretools.vscode-docker
 sysoev.language-stylus
+tombonnike.vscode-status-bar-format-toggle
 vscodevim.vim
 xabikos.JavaScriptSnippets
