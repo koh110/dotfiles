@@ -10,8 +10,10 @@ cp .tmux.conf ~/
 cp .zshrc ~/
 cp .zshenv ~/
 
-cp -r .atom ~/
-apm install --packages-file atomfile
+# cp -r .atom ~/
+# apm install --packages-file atomfile
 
 cp .vim ~/
 cp .vimrc ~/
+
+cat code/extensions.txt | xargs -n 1 code --install-extension

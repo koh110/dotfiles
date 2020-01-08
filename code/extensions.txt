@@ -3,8 +3,6 @@ CoenraadS.bracket-pair-colorizer
 dbaeumer.vscode-eslint
 esbenp.prettier-vscode
 jpoissonnier.vscode-styled-components
-jpotterm.simple-vim
 koh110.zenvim
 tombonnike.vscode-status-bar-format-toggle
-vscodevim.vim
 xabikos.JavaScriptSnippets
