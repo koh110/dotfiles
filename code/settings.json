@@ -18,6 +18,7 @@
   "editor.formatOnPaste": false,
   "editor.formatOnSave": false,
   "editor.formatOnType": false,
+  "editor.quickSuggestions": true,
   "eslint.validate": [
     "javascript",
     "javascriptreact",
@@ -31,5 +32,13 @@
   "[typescriptreact]": {
     "editor.tabSize": 2
   },
-  "typescript.tsc.autoDetect": "off"
+  "typescript.tsc.autoDetect": "off",
+  "npm.autoDetect": "off",
+  "vim.statusBarColorControl": false,
+  "vim.ignorecase": false,
+  "vim.incsearch": false,
+  "vim.smartcase": false,
+  "vim.surround": false,
+  "vim.useSystemClipboard": true,
+  "workbench.editor.showTabs": true,
 }

@@ -3,9 +3,8 @@ CoenraadS.bracket-pair-colorizer
 dbaeumer.vscode-eslint
 esbenp.prettier-vscode
 jpoissonnier.vscode-styled-components
-leizongmin.node-module-intellisense
-ms-azuretools.vscode-docker
-sysoev.language-stylus
+jpotterm.simple-vim
+koh110.zenvim
 tombonnike.vscode-status-bar-format-toggle
 vscodevim.vim
 xabikos.JavaScriptSnippets
