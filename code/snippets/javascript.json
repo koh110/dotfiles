@@ -2,14 +2,11 @@
   "async main": {
     "prefix": "main",
     "body": [
-      "async function main() {",
+      "const main = async () => {",
       "  $1",
       "}",
       "",
-      "main()",
-      "  .catch((e) => {",
-      "    console.error(e)",
-      "  })"
+      "main().catch(console.error)"
     ],
     "description": "async main"
   },
@@ -22,7 +19,10 @@
   },
   "Print to console": {
     "prefix": "log",
-    "body": ["console.log('$1');", "$2"],
+    "body": [
+      "console.log('$1');",
+      "$2"
+    ],
     "description": "Log output to console"
   }
   // Place your snippets for javascript here. Each snippet is defined under a snippet name and has a prefix, body and
