@@ -63,8 +63,8 @@ endif
 " color
 syntax enable
 set background=dark
-" colorscheme solarized
-colorscheme molokai
+colorscheme solarized
+" colorscheme molokai
 highlight Normal ctermbg=none
 
 filetype plugin indent on
