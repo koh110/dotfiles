@@ -1,44 +1,46 @@
 {
-  "window.zoomLevel": 1,
-  "editor.renderWhitespace": "boundary",
-  "editor.tabSize": 2,
-  "[javascript]": {
-    "editor.tabSize": 2
-  },
-  "javascript.suggestionActions.enabled": false,
-  "emmet.triggerExpansionOnTab": true,
-  "emmet.includeLanguages": {
-    "javascript": "javascriptreact"
-  },
-  "emmet.syntaxProfiles": {
-    "javascript": "html"
-  },
-  "editor.multiCursorModifier": "ctrlCmd",
-  "workbench.colorTheme": "One Monokai",
-  "editor.formatOnPaste": true,
-  "editor.formatOnSave": true,
-  "editor.formatOnType": true,
-  "editor.quickSuggestions": true,
-  "eslint.validate": [
-    "javascript",
-    "javascriptreact",
-    {
-      "language": "typescript"
+    "editor.renderWhitespace": "boundary",
+    "editor.tabSize": 2,
+    "[javascript]": {
+      "editor.tabSize": 2
     },
-    {
-      "language": "typescriptreact"
-    }
-  ],
-  "[typescriptreact]": {
-    "editor.tabSize": 2
-  },
-  "typescript.tsc.autoDetect": "off",
-  "npm.autoDetect": "off",
-  "vim.statusBarColorControl": false,
-  "vim.ignorecase": false,
-  "vim.incsearch": false,
-  "vim.smartcase": false,
-  "vim.surround": false,
-  "vim.useSystemClipboard": true,
-  "workbench.editor.showTabs": true,
-}
+    "javascript.suggestionActions.enabled": false,
+    "emmet.triggerExpansionOnTab": true,
+    "emmet.includeLanguages": {
+      "javascript": "javascriptreact"
+    },
+    "emmet.syntaxProfiles": {
+      "javascript": "html"
+    },
+    "editor.multiCursorModifier": "ctrlCmd",
+    "workbench.colorTheme": "One Monokai",
+    "editor.formatOnPaste": true,
+    "editor.formatOnSave": true,
+    "editor.formatOnType": true,
+    "editor.quickSuggestions": true,
+    "eslint.validate": [
+      "javascript",
+      "javascriptreact",
+      {
+        "language": "typescript"
+      },
+      {
+        "language": "typescriptreact"
+      }
+    ],
+    "[typescriptreact]": {
+      "editor.tabSize": 2
+    },
+    "typescript.tsc.autoDetect": "off",
+    "npm.autoDetect": "off",
+    "vim.statusBarColorControl": false,
+    "vim.ignorecase": false,
+    "vim.incsearch": false,
+    "vim.smartcase": false,
+    "vim.surround": false,
+    "vim.useSystemClipboard": true,
+    "workbench.editor.showTabs": true,
+    "typescript.updateImportsOnFileMove.enabled": "always",
+    "editor.bracketPairColorization.enabled": true,
+    "editor.guides.bracketPairs": "active",
+  }

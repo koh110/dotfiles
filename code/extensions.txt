@@ -1,10 +1,10 @@
 azemoh.one-monokai
-CoenraadS.bracket-pair-colorizer
 dbaeumer.vscode-eslint
 esbenp.prettier-vscode
 jpoissonnier.vscode-styled-components
 koh110.zenvim
 ms-azuretools.vscode-docker
+MS-CEINTL.vscode-language-pack-ja
 ms-vsliveshare.vsliveshare
 tombonnike.vscode-status-bar-format-toggle
 xabikos.JavaScriptSnippets
