@@ -1,0 +1,17 @@
+{
+  "react component": {
+    "prefix": "fc",
+    "body": [
+      "import React from 'react'",
+      "",
+      "type Props = {",
+      "",
+      "}",
+      "",
+      "export const ${TM_FILENAME_BASE}: React.FC<Props> = () => {",
+      "",
+      "}"
+    ],
+    "description": "fc component"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "async main": {
+		"scope": "javascript,typescript,typescriptreact",
+    "prefix": "main",
+    "body": [
+      "const main = async () => {",
+      "  $1",
+      "}",
+      "",
+      "main().catch(console.error)"
+    ],
+    "description": "async main"
+  },
+  "sleep": {
+		"scope": "javascript,typescript",
+    "prefix": "sleep",
+    "body": [
+      "const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))"
+    ],
+    "description": "async sleep"
+  },
+  "Print to console": {
+		"scope": "javascript,typescript,typescriptreact",
+    "prefix": "log",
+    "body": [
+      "console.log('$1')",
+      "$2"
+    ],
+    "description": "Log output to console"
+  },
+  "format-date": {
+		"scope": "javascript,typescript,typescriptreact",
+    "prefix": "format-date",
+    "body": [
+      "const formatter = new Intl.DateTimeFormat('ja-jP', {",
+      "  year: 'numeric',",
+      "  month: '2-digit',",
+      "  day: '2-digit',",
+      "  hour: '2-digit',",
+      "  minute: '2-digit',",
+      "  second: '2-digit',",
+      "  hour12: false",
+      "})",
+      "",
+      "const format = (date) => {",
+      "  return formatter.formatToParts(date).map(({ type, value }) => {",
+      "    switch(type) {",
+      "      case 'literal':",
+      "        if (/\\s/.test(value)) {",
+      "          return '-';",
+      "        }",
+      "        if (value === '/' || value === ':') {",
+      "          return '';",
+      "        }",
+      "      default:",
+      "        return value;",
+      "    }",
+      "  }).join('')",
+      "}"
+    ],
+    "description": "format date"
+  },
+  "puppeteer": {
+		"scope": "javascript,typescript",
+    "prefix": "puppeteer",
+    "body": [
+      "const main = async () => {",
+      "  const browser = await puppeteer.launch({ headless: true })",
+      "  const page = await browser.newPage()",
+      "  await page.goto(url)",
+      "  await page.waitForSelector('.classname')",
+      "",
+      "  await browser.close()",
+      "}",
+      "main().catch(console.error)"
+    ]
+  },
+  "function": {
+		"scope": "javascript,typescript,typescriptreact",
+    "prefix": "fn",
+    "body": [
+      "const $1 = () => {",
+      "",
+      "}"
+    ],
+    "description": "function"
+  },
+  "async function": {
+		"scope": "javascript,typescript,typescriptreact",
+    "prefix": "afn",
+    "body": [
+      "const $1 = async () => {",
+      "",
+      "}"
+    ],
+    "description": "async function"
+  }
+}
