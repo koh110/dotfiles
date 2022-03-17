@@ -8,8 +8,8 @@
       "",
       "}",
       "",
-      "export const ${TM_FILENAME_BASE}: React.FC<Props> = () => {",
-      "",
+      "export const ${TM_FILENAME_BASE}: React.FC<Props> = (props) => {",
+      "  return (<div>${TM_FILENAME_BASE}</div>)",
       "}"
     ],
     "description": "fc component"
