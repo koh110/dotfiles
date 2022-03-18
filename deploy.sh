@@ -10,9 +10,6 @@ cp .tmux.conf ~/
 cp .zshrc ~/
 cp .zshenv ~/
 
-# cp -r .atom ~/
-# apm install --packages-file atomfile
-
 mkdir -p .vim
 cp -r .vim/* ~/.vim/
 cp .vimrc ~/
