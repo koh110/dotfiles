@@ -1,6 +1,6 @@
 {
   "async main": {
-		"scope": "javascript,typescript,typescriptreact",
+    "scope": "javascript,typescript,typescriptreact",
     "prefix": "main",
     "body": [
       "const main = async () => {",
@@ -12,7 +12,7 @@
     "description": "async main"
   },
   "sleep": {
-		"scope": "javascript,typescript",
+    "scope": "javascript,typescript",
     "prefix": "sleep",
     "body": [
       "const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))"
@@ -20,7 +20,7 @@
     "description": "async sleep"
   },
   "Print to console": {
-		"scope": "javascript,typescript,typescriptreact",
+    "scope": "javascript,typescript,typescriptreact",
     "prefix": "log",
     "body": [
       "console.log('$1')",
@@ -29,7 +29,7 @@
     "description": "Log output to console"
   },
   "format-date": {
-		"scope": "javascript,typescript,typescriptreact",
+    "scope": "javascript,typescript,typescriptreact",
     "prefix": "format-date",
     "body": [
       "const formatter = new Intl.DateTimeFormat('ja-jP', {",
@@ -61,7 +61,7 @@
     "description": "format date"
   },
   "puppeteer": {
-		"scope": "javascript,typescript",
+    "scope": "javascript,typescript",
     "prefix": "puppeteer",
     "body": [
       "const main = async () => {",
@@ -76,7 +76,7 @@
     ]
   },
   "function": {
-		"scope": "javascript,typescript,typescriptreact",
+    "scope": "javascript,typescript,typescriptreact",
     "prefix": "fn",
     "body": [
       "const $1 = () => {",
@@ -86,7 +86,7 @@
     "description": "function"
   },
   "async function": {
-		"scope": "javascript,typescript,typescriptreact",
+    "scope": "javascript,typescript,typescriptreact",
     "prefix": "afn",
     "body": [
       "const $1 = async () => {",

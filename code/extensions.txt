@@ -1,6 +1,9 @@
 dbaeumer.vscode-eslint
 koh110.zenvim
 ms-azuretools.vscode-docker
+ms-vscode-remote.remote-containers
+ms-vscode-remote.remote-ssh
+ms-vscode-remote.remote-ssh-edit
 Prisma.prisma
 taichi.vscode-textlint
 tombonnike.vscode-status-bar-format-toggle
