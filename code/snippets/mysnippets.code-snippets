@@ -22,10 +22,7 @@
   "Print to console": {
     "scope": "javascript,typescript,typescriptreact",
     "prefix": "log",
-    "body": [
-      "console.log('$1')",
-      "$2"
-    ],
+    "body": ["console.log('$1')", "$2"],
     "description": "Log output to console"
   },
   "format-date": {
@@ -78,21 +75,25 @@
   "function": {
     "scope": "javascript,typescript,typescriptreact",
     "prefix": "fn",
-    "body": [
-      "const $1 = () => {",
-      "",
-      "}"
-    ],
+    "body": ["const $1 = () => {", "", "}"],
     "description": "function"
   },
   "async function": {
     "scope": "javascript,typescript,typescriptreact",
     "prefix": "afn",
-    "body": [
-      "const $1 = async () => {",
-      "",
-      "}"
-    ],
+    "body": ["const $1 = async () => {", "", "}"],
     "description": "async function"
+  },
+  "object has": {
+    "scope": "javascript,typescript,typescriptreact",
+    "prefix": "objecthas",
+    "body": ["Object.prototype.hasOwnProperty.call($1, 'key')"],
+    "description": "Object.has"
+  },
+  "pretty type": {
+    "scope": "typescript,typescriptreact",
+    "prefix": "prettytype",
+    "body": ["type Prettify<T> = { [K in keyof T]: T[K] } & {}"],
+    "description": "prettify type"
   }
 }

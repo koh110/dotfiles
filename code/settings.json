@@ -17,9 +17,13 @@
   "editor.formatOnPaste": false,
   "editor.formatOnSave": false,
   "editor.formatOnType": false,
-  "editor.quickSuggestions": true,
+  "editor.quickSuggestions": {
+    "comments": "on",
+    "strings": "on",
+    "other": "on"
+  },
   "editor.bracketPairColorization.enabled": true,
-  "editor.guides.bracketPairs":"active",
+  "editor.guides.bracketPairs": "active",
   "eslint.validate": [
     "javascript",
     "javascriptreact",
@@ -31,7 +35,8 @@
     }
   ],
   "[typescriptreact]": {
-    "editor.tabSize": 2
+    "editor.tabSize": 2,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
   },
   "typescript.tsc.autoDetect": "off",
   "npm.autoDetect": "off",
@@ -41,5 +46,9 @@
   "vim.smartcase": false,
   "vim.surround": false,
   "vim.useSystemClipboard": true,
-  "workbench.editor.showTabs": true
+  "workbench.editor.showTabs": true,
+  "typescript.updateImportsOnFileMove.enabled": "always",
+  "[astro]": {
+    "editor.tabSize": 2
+  }
 }

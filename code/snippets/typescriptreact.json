@@ -13,5 +13,18 @@
       "}"
     ],
     "description": "fc component"
+  },
+  "react named hooks": {
+    "prefix": "rnh",
+    "body": [
+      "export const $1 = (args) => {",
+      "  const res = _$1(args)",
+      "  Object.entries(res).forEach(([key, val]) => {",
+      "    Object.defineProperty(val, 'name', { value: key })",
+      "  })",
+      "  return res",
+      "}",
+    ],
+    "description": "強制的にデバッグ用の名前をつける"
   }
 }
