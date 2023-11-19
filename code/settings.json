@@ -2,7 +2,8 @@
   "editor.renderWhitespace": "boundary",
   "editor.tabSize": 2,
   "[javascript]": {
-    "editor.tabSize": 2
+    "editor.tabSize": 2,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
   },
   "javascript.suggestionActions.enabled": false,
   "emmet.triggerExpansionOnTab": true,
@@ -50,5 +51,23 @@
   "typescript.updateImportsOnFileMove.enabled": "always",
   "[astro]": {
     "editor.tabSize": 2
+  },
+  "editor.inlineSuggest.enabled": true,
+  "typescript.referencesCodeLens.enabled": true,
+  "typescript.referencesCodeLens.showOnAllFunctions": true,
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": false,
+    "markdown": true,
+    "scminput": false
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[html]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[css]": {
+    "editor.defaultFormatter": "vscode.css-language-features"
   }
 }
