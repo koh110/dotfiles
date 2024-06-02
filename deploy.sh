@@ -11,7 +11,7 @@ cp .zshrc ~/
 cp .zshenv ~/
 
 mkdir -p .vim
-cp -r .vim/* ~/.vim/
+# cp -r .vim/* ~/.vim/
 cp .vimrc ~/
 
 # cat code/extensions.txt | xargs -n 1 code --install-extension

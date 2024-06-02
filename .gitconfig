@@ -5,3 +5,5 @@
   ui = true
 [core]
   editor = vim
+# 1password on WSL2
+#  sshCommand = ssh.exe
