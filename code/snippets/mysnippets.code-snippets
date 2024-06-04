@@ -3,7 +3,7 @@
     "scope": "javascript,typescript,typescriptreact",
     "prefix": "main",
     "body": [
-      "const main = async () => {",
+      "async function main() {",
       "  $1",
       "}",
       "",
