@@ -47,7 +47,7 @@
   "vim.smartcase": false,
   "vim.surround": false,
   "vim.useSystemClipboard": true,
-  "workbench.editor.showTabs": true,
+  "workbench.editor.showTabs": "multiple",
   "typescript.updateImportsOnFileMove.enabled": "always",
   "[astro]": {
     "editor.tabSize": 2
