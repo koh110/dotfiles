@@ -7,6 +7,8 @@ import { parseArgs, promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { copyFile, cp, constants, writeFile } from 'node:fs/promises'
 import { execFile as _execFile } from 'node:child_process'
+import { isWSL, getWindowsHomeDir } from './wsl.ts'
+
 const execFile = promisify(_execFile)
 
 const { values } = parseArgs({
@@ -52,7 +54,18 @@ main().catch(console.error)
 
 async function code() {
   console.log('backup: code')
-  const FILE_DIR = `${homedir()}/Library/Application Support/Code/User`
+  const { FILE_DIR } = await (async () => {
+    if (isWSL()) {
+      const home = await getWindowsHomeDir()
+      return {
+        FILE_DIR: `${home}/AppData/Roaming/Code/User`
+      }
+    }
+
+    return {
+      FILE_DIR: `${homedir()}/Library/Application Support/Code/User`
+    }
+  })()
   const TARGET_DIR = `${import.meta.dirname}/code`
 
   const files = [

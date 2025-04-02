@@ -2,13 +2,26 @@
 // ./deploy-code.ts --all
 // ./deploy-code.ts --prompts --settings
 
-import { homedir } from 'node:os'
+import { homedir, platform } from 'node:os'
 import { resolve, join } from 'node:path'
-import { readdir, readFile, writeFile, copyFile, cp, constants } from 'node:fs/promises'
+import { readdir, readFile, writeFile, copyFile, cp, constants, access } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
+import { isWSL, getWindowsHomeDir } from './wsl.ts'
 
-const TARGET_DIR = `${homedir()}/Library/Application Support/Code/User`
-const TARGET_DIR_INSIDERS = `${homedir()}/Library/Application Support/Code - Insiders/User`
+const { TARGET_DIR, TARGET_DIR_INSIDERS } = await (async () => {
+  if (isWSL()) {
+    const home = await getWindowsHomeDir()
+    return {
+      TARGET_DIR: `${home}/AppData/Roaming/Code/User`,
+      TARGET_DIR_INSIDERS: `${home}/AppData/Roaming/Code - Insiders/User`
+    }
+  }
+
+  return {
+    TARGET_DIR: `${homedir()}/Library/Application Support/Code/User`,
+    TARGET_DIR_INSIDERS: `${homedir()}/Library/Application Support/Code - Insiders/User`
+  }
+})()
 
 const { values } = parseArgs({
   options: {
