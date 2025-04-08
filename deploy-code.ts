@@ -106,5 +106,9 @@ async function prompts() {
     return readFile(filePath, 'utf-8');
   }))
 
-  await writeFile(join(TARGET_DIR_INSIDERS, 'prompts', 'koh110.prompt.md'), strs.join('\n\n'))
+  const filename = 'koh110.prompt.md'
+  await Promise.all([
+    writeFile(join(TARGET_DIR, 'prompts', filename), strs.join('\n\n')),
+    writeFile(join(TARGET_DIR_INSIDERS, 'prompts', filename), strs.join('\n\n'))
+  ])
 }
