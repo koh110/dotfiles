@@ -43,6 +43,12 @@
         "command": "-workbench.action.quickOpenLeastRecentlyUsedEditorInGroup"
     },
     {
+        "key": "tab",
+        "command": "editor.action.inlineSuggest.commit",
+        "when": "editorTextFocus"
+    },
+    // windows
+    {
         "key": "alt+f",
         "command": "actions.find"
     },
@@ -50,36 +56,50 @@
         "key": "ctrl+f",
         "command": "-actions.find"
     },
+    {
+        "key": "alt+a",
+        "command": "editor.action.selectAll"
+    },
+    {
+        "key": "alt+d",
+        "command": "editor.action.addSelectionToNextFindMatch",
+        "when": "editorFocus"
+    },
     // shell cursor style
     {
         "key": "ctrl+p",
         "command": "cursorUp",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
     },
     {
         "key": "ctrl+n",
         "command": "cursorDown",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
     },
     {
         "key": "ctrl+f",
         "command": "cursorRight",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
     },
     {
         "key": "ctrl+b",
         "command": "cursorLeft",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
     },
     {
         "key": "ctrl+a",
         "command": "cursorLineStart",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
     },
     {
         "key": "ctrl+e",
         "command": "cursorEnd",
-        "when": "editorTextFocus"
+        "when": "editorTextFocus || terminalFocus"
+    },
+    {
+        "key": "ctrl+k",
+        "command": "deleteAllRight",
+        "when": "terminalFocus"
     },
     {
         "key": "ctrl+k",
@@ -94,7 +114,12 @@
     },
     {
         "key": "ctrl+y",
-        "command": "editor.action.inlineSuggest.showPreviousSuggestion",
+        "command": "editor.action.clipboardPasteAction",
         "when": "editorTextFocus"
+    },
+    {
+        "key": "ctrl+d",
+        "command": "deleteRight",
+        "when": "editorTextFocus && !editorReadonly"
     }
 ]

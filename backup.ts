@@ -2,12 +2,12 @@
 // ./backup.ts --all
 // ./backup.ts --vim --tmux
 
-import path from 'node:path'
+import { join } from 'node:path'
 import { parseArgs, promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { copyFile, cp, constants, writeFile } from 'node:fs/promises'
 import { execFile as _execFile } from 'node:child_process'
-import { isWSL, getWindowsHomeDir } from './wsl.ts'
+import { isWSL, getWindowsHomeDir } from './lib/wsl.ts'
 
 const execFile = promisify(_execFile)
 
@@ -70,18 +70,19 @@ async function code() {
 
   const files = [
     {
-      from: path.join(FILE_DIR, 'settings.json'),
-      to: path.join(TARGET_DIR, 'settings.json')
+      from: join(FILE_DIR, 'settings.json'),
+      to: join(TARGET_DIR, 'settings.json')
     },
     {
-      from: path.join(FILE_DIR, 'keybindings.json'),
-      to: path.join(TARGET_DIR, 'keybindings.json')
+      from: join(FILE_DIR, 'keybindings.json'),
+      to: join(TARGET_DIR, 'keybindings.json')
     }
   ]
+
   const directories = [
     {
-      from: path.join(FILE_DIR, 'snippets'),
-      to: path.join(TARGET_DIR, 'snippets')
+      from: join(FILE_DIR, 'snippets'),
+      to: join(TARGET_DIR, 'snippets')
     }
   ]
 
@@ -107,7 +108,7 @@ async function codeExtension() {
     throw new Error(`Error: ${stderr}`)
   }
   await writeFile(
-    path.join(TARGET_DIR, 'extensions.txt'),
+    join(TARGET_DIR, 'extensions.txt'),
     stdout,
     { encoding: 'utf-8' }
   )
@@ -117,12 +118,12 @@ async function vim() {
   console.log('backup: vim')
   const files = [
     {
-      from: path.join(homedir(), '.vimrc'),
-      to: path.join(import.meta.dirname, '.vimrc')
+      from: join(homedir(), '.vimrc'),
+      to: join(import.meta.dirname, '.vimrc')
     },
     {
-      from: path.join(homedir(), '.vim/dein.toml'),
-      to: path.join(homedir(), '.vim/dein.toml')
+      from: join(homedir(), '.vim/dein.toml'),
+      to: join(homedir(), '.vim/dein.toml')
     }
   ]
 
@@ -137,12 +138,12 @@ async function zsh() {
   console.log('backup: zsh')
   const files = [
     {
-      from: path.join(homedir(), '.zshrc'),
-      to: path.join(import.meta.dirname, '.zshrc')
+      from: join(homedir(), '.zshrc'),
+      to: join(import.meta.dirname, '.zshrc')
     },
     {
-      from: path.join(homedir(), '.zshenv'),
-      to: path.join(import.meta.dirname, '.zshenv')
+      from: join(homedir(), '.zshenv'),
+      to: join(import.meta.dirname, '.zshenv')
     }
   ]
 
@@ -156,8 +157,8 @@ async function zsh() {
 async function tmux() {
   console.log('backup: tmux')
   await copyFile(
-    path.join(homedir(), '.tmux.conf'),
-    path.join(import.meta.dirname, '.tmux.conf'),
+    join(homedir(), '.tmux.conf'),
+    join(import.meta.dirname, '.tmux.conf'),
     constants.COPYFILE_FICLONE
   )
 }

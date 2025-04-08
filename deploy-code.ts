@@ -2,11 +2,11 @@
 // ./deploy-code.ts --all
 // ./deploy-code.ts --prompts --settings
 
-import { homedir, platform } from 'node:os'
+import { homedir } from 'node:os'
 import { resolve, join } from 'node:path'
 import { readdir, readFile, writeFile, copyFile, cp, constants, access } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
-import { isWSL, getWindowsHomeDir } from './wsl.ts'
+import { isWSL, getWindowsHomeDir } from './lib/wsl.ts'
 
 const { TARGET_DIR, TARGET_DIR_INSIDERS } = await (async () => {
   if (isWSL()) {
@@ -84,6 +84,31 @@ async function settings() {
       to: join(TARGET_DIR_INSIDERS, 'snippets')
     }
   ]
+
+  const wslSettings = async () => {
+    if (!isWSL()) {
+      return
+    }
+
+    const settings = {
+      "mcp": {
+        "inputs": [],
+        "servers": {
+          "mcp-koh110": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+              "--experimental-strip-types",
+              "--watch",
+              `${homedir()}/dev/mcp-koh110/src/index.ts`
+            ]
+          }
+        }
+      }
+    }
+    await writeFile(join(homedir(), '.vscode-server/data/Machine/settings.json'), JSON.stringify(settings, null, 2))
+  }
+
   await Promise.all([
     ...files.map(({ from, to }) => {
       return copyFile(from, to, constants.COPYFILE_FICLONE)
@@ -92,7 +117,8 @@ async function settings() {
       return cp(from, to, {
         recursive: true
       })
-    })
+    }),
+    wslSettings()
   ])
 }
 

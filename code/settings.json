@@ -41,12 +41,6 @@
   },
   "typescript.tsc.autoDetect": "off",
   "npm.autoDetect": "off",
-  "vim.statusBarColorControl": false,
-  "vim.ignorecase": false,
-  "vim.incsearch": false,
-  "vim.smartcase": false,
-  "vim.surround": false,
-  "vim.useSystemClipboard": true,
   "workbench.editor.showTabs": "multiple",
   "typescript.updateImportsOnFileMove.enabled": "always",
   "[astro]": {
@@ -55,12 +49,6 @@
   "editor.inlineSuggest.enabled": true,
   "typescript.referencesCodeLens.enabled": true,
   "typescript.referencesCodeLens.showOnAllFunctions": true,
-  "github.copilot.enable": {
-    "*": true,
-    "plaintext": false,
-    "markdown": true,
-    "scminput": false
-  },
   "[typescript]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode"
   },
@@ -69,5 +57,12 @@
   },
   "[css]": {
     "editor.defaultFormatter": "vscode.css-language-features"
-  }
+  },
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": false,
+    "markdown": true,
+    "scminput": false
+  },
+  "chat.agent.enabled": true
 }

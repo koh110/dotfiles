@@ -123,26 +123,36 @@ function tmux_automatically_attach_session()
                 return 1
             fi
 
-            if tmux has-session >/dev/null 2>&1 && tmux list-sessions | grep -qE '.*]$'; then
-                # detached session exists
+            if tmux has-session >/dev/null 2>&1; then
+                # セッションが存在する場合は、すべてのセッションを表示する（アタッチ済みのものも含む）
                 tmux list-sessions
-                echo -n "Tmux: attach? (y/N/num) "
+                echo -n "Tmux: attach? (y/N/num/new) "
                 read
                 if [[ "$REPLY" =~ ^[Yy]$ ]] || [[ "$REPLY" == '' ]]; then
+                    # 'y'または空白の場合、最初のセッションにアタッチ
                     tmux attach-session
                     if [ $? -eq 0 ]; then
                         echo "$(tmux -V) attached session"
                         return 0
                     fi
                 elif [[ "$REPLY" =~ ^[0-9]+$ ]]; then
+                    # 数字の場合、その番号のセッションにアタッチ
                     tmux attach -t "$REPLY"
                     if [ $? -eq 0 ]; then
                         echo "$(tmux -V) attached session"
                         return 0
                     fi
+                elif [[ "$REPLY" =~ ^[Nn]([Ee][Ww])?$ ]]; then
+                    # 'n', 'new'の場合、新しいセッションを作成
+                    # この場合は下の新規セッション作成処理に進む
+                    :
+                else
+                    # その他の入力の場合も新規セッション作成処理に進む
+                    :
                 fi
             fi
 
+            # 新しいセッションを作成
             if is_osx && is_exists 'reattach-to-user-namespace'; then
                 # on OS X force tmux's default command
                 # to spawn a shell in the user's namespace
