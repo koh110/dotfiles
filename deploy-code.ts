@@ -4,7 +4,7 @@
 
 import { homedir } from 'node:os'
 import { resolve, join } from 'node:path'
-import { readdir, readFile, writeFile, copyFile, cp, constants, access } from 'node:fs/promises'
+import { readdir, readFile, writeFile, copyFile, cp, constants, access, mkdir } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { isWSL, getWindowsHomeDir } from './lib/wsl.ts'
 
@@ -133,8 +133,19 @@ async function prompts() {
   }))
 
   const filename = 'koh110.prompt.md'
+
+  const createFile = async (dir: string ,filename: string) => {
+    try {
+      await access(join(dir, filename))
+    } catch (e) {
+      await mkdir(dir, { recursive: true })
+      console.log('create dir', dir)
+    }
+    await writeFile(join(dir, filename), strs.join('\n\n'))
+  }
+
   await Promise.all([
-    writeFile(join(TARGET_DIR, 'prompts', filename), strs.join('\n\n')),
-    writeFile(join(TARGET_DIR_INSIDERS, 'prompts', filename), strs.join('\n\n'))
+    createFile(join(TARGET_DIR, 'prompts'), filename),
+    createFile(join(TARGET_DIR_INSIDERS, 'prompts'), filename)
   ])
 }
