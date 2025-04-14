@@ -10,7 +10,7 @@
 ### JavaScript
 
 - はじめてpackage.jsonを作成する場合は、`private: true` を用いて必要最低限のパラメータのみ利用する
-  - 次のパラメータは必要ない
+  - 次のパラメータは利用しない
     - name
     - main
     - version
@@ -27,7 +27,7 @@
 ### TypeScript
 
 - JavaScriptのルールを包括する
-- Node.jsで実行する場合は `ts-node` などのライブラリを利用せず `--experimental-strip-types` を利用する
+- Node.jsで実行する場合は `ts-node` などのライブラリを利用を禁止し `--experimental-strip-types` を利用する
 - 最新のバージョンに従った書き方をする
 - interfaceよりtypeを優先して利用する
-- できるだけ `as const` を利用する
+- できる限り `as const` を利用する

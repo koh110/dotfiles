@@ -42,11 +42,6 @@
         "key": "ctrl+shift+tab",
         "command": "-workbench.action.quickOpenLeastRecentlyUsedEditorInGroup"
     },
-    {
-        "key": "tab",
-        "command": "editor.action.inlineSuggest.commit",
-        "when": "editorTextFocus"
-    },
     // windows
     {
         "key": "alt+f",
