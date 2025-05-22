@@ -13,3 +13,4 @@ Apply the [general coding guidelines](./javascript.instructions.md) to all code.
 
 - interfaceよりtypeを優先して利用する
 - できる限り `as const` を記述する
+- baseUrlを利用しない

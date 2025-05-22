@@ -1,4 +1,4 @@
-#!/usr/bin/env node --experimental-strip-types
+#!/usr/bin/env node
 // ./deploy-code.ts --all
 // ./deploy-code.ts --prompts --settings
 
