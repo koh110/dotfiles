@@ -11,6 +11,7 @@ Apply the [general coding guidelines](./javascript.instructions.md) to all code.
 
 ## Guidelines
 
-- interfaceよりtypeを優先して利用する
-- できる限り `as const` を記述する
+- 推論できる型は推論を優先して採用し、再定義を禁じる
+- interfaceは利用せずtypeを利用する
+- 可能な場合は必ず `as const` を記述する
 - baseUrlを利用しない

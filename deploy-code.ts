@@ -91,7 +91,7 @@ async function settings() {
     */
   ]
 
-  const wslSettings = async () => {
+  const mcp = async () => {
     if (!isWSL()) {
       return
     }
@@ -124,7 +124,7 @@ async function settings() {
         recursive: true
       })
     }),
-    wslSettings()
+    mcp()
   ])
 }
 
