@@ -12,6 +12,7 @@ Apply the [general coding guidelines](./general.instructions.md) to all code.
 - arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
 - 環境変数を扱う処理はconfig.jsにまとめる
 - import/requireは相対パスを利用する
+- import/requireでindexを省略しない
 
 ## package.json Guidelines
 
