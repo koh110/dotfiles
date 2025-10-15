@@ -27,7 +27,7 @@
   },
   "format-date": {
     "scope": "javascript,typescript,typescriptreact",
-    "prefix": "format-date",
+    "prefix": "formatdate",
     "body": [
       "const formatter = new Intl.DateTimeFormat('ja-jP', {",
       "  year: 'numeric',",
@@ -114,5 +114,14 @@
       "const dirname = path.dirname(fileURLToPath(import.meta.url))"
     ],
     "description": "prettify type"
+  },
+  "drive:outputfile": {
+    "scope": "javascript",
+    "prefix": "outputdrive",
+    "body": [
+      "const outputFolder = DriveApp.getFolderById(folderId)",
+      "const blob = Utilities.newBlob('', 'text/csv', fileName).setDataFromString(csvStr, 'utf-8')",
+      "outputFolder.createFile(blob)"
+    ]
   }
 }
