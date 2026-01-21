@@ -34,7 +34,6 @@ Apply the [general coding guidelines](./general.instructions.md) to all code.
 - useEffectを変更検知で利用することを禁じる
 - useCallback, useMemoの利用を避ける
   - パフォーマンスに問題が発生した場合のみ利用を検討する
-- ReactのコンポーネントはArrow Functionではなく通常のFunctionを利用する
 - propsはinterfaceではなくtypeで定義する
 - コンポーネント表示/非表示の制御はActivityコンポーネントを利用する
   - typeが絞り込めないケースのみActivityを利用しない

@@ -17,3 +17,5 @@ Apply the [general coding guidelines](./javascript.instructions.md) to all code.
 - 可能な場合は必ず `as const` を記述する
 - baseUrlを利用しない
 - any型を利用しない
+  - やむを得ない場合は`unknown`を利用し、type guardで型を絞り込む
+  - 外部ライブラリの型定義が不完全な場合のみ、コメントで理由を明記した上で使用を許可する
