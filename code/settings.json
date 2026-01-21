@@ -25,16 +25,6 @@
   },
   "editor.bracketPairColorization.enabled": true,
   "editor.guides.bracketPairs": "active",
-  "eslint.validate": [
-    "javascript",
-    "javascriptreact",
-    {
-      "language": "typescript"
-    },
-    {
-      "language": "typescriptreact"
-    }
-  ],
   "[typescriptreact]": {
     "editor.tabSize": 2,
     "editor.defaultFormatter": "esbenp.prettier-vscode"
@@ -69,12 +59,10 @@
   "remote.SSH.remotePlatform": {
   },
   "github.copilot.nextEditSuggestions.enabled": true,
-  "chat.tools.autoApprove": true,
   "terminal.integrated.defaultProfile.osx": "bash",
   "github.copilot.chat.agent.thinkingTool": true,
   "github.copilot.chat.edits.temporalContext.enabled": true,
   "github.copilot.chat.editor.temporalContext.enabled": true,
-  "github.copilot.chat.enableRetryAfterFilteredResponse": true,
   "github.copilot.chat.generateTests.codeLens": true,
   "github.copilot.chat.languageContext.fix.typescript.enabled": true,
   "github.copilot.chat.languageContext.inline.typescript.enabled": true,
@@ -82,5 +70,34 @@
   "github.copilot.chat.newWorkspace.useContext7": true,
   "github.copilot.chat.notebook.followCellExecution.enabled": true,
   "git.autofetch": true,
-  "chat.agentSessionsViewLocation": "view"
+  "chat.agentSessionsViewLocation": "view",
+  "chat.tools.terminal.autoApprove": {
+    "npm run build -w api": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "npm run build -w client": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "npm run tsc -w client": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "git checkout": true,
+    "npm run build": true,
+    "npx": true,
+    "sed": true,
+    "npm run test-local": true,
+    "docker compose": true,
+    "make": true,
+    "go": true
+  },
+  "go.testFlags": [
+    "-v"
+  ],
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "go.toolsManagement.autoUpdate": true
 }
