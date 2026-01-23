@@ -1,4 +1,4 @@
-#!/usr/bin/env node --experimental-strip-types
+#!/usr/bin/env node
 // ./backup.ts --all
 // ./backup.ts --vim --tmux
 
