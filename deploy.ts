@@ -3,7 +3,7 @@
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { mkdir, copyFile, constants } from 'node:fs/promises'
+import { mkdir, copyFile, constants, cp } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 
 const { values } = parseArgs({
@@ -37,6 +37,11 @@ const { values } = parseArgs({
       type: 'boolean',
       short: 'v',
       default: false,
+    },
+    copilot: {
+      type: 'boolean',
+      short: 'c',
+      default: false,
     }
   }
 })
@@ -47,10 +52,20 @@ async function main() {
     (values.all || values.git) && git(),
     (values.all || values.tmux) && tmux(),
     (values.all || values.zsh) && zsh(),
-    (values.all || values.vim) && vim()
+    (values.all || values.vim) && vim(),
+    (values.all || values.copilot) && copilot()
   ])
 }
 main().catch(console.error)
+
+async function copilot() {
+  console.log('copy: copilot')
+  const targetDir = join(homedir(), '.copilot')
+  await mkdir(targetDir, { recursive: true })
+  await cp(join(import.meta.dirname, '.copilot/skills'), join(targetDir, 'skills'), {
+    recursive: true
+  })
+}
 
 async function ssh() {
   console.log('copy: ssh')
