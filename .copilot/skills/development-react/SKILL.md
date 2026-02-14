@@ -3,10 +3,13 @@ name: development-react
 description: Skills for React development guidelines.
 ---
 
+- 後方互換性は必要ない
 - ReactのコンポーネントはArrow Functionではなく通常のFunctionを利用する
 - 以下のガイドラインに従う
   - https://react.dev/learn/you-might-not-need-an-effect
 - useEffectを変更検知で利用することを禁じる
+  - 下記のドキュメントを参考に必要な場合に限りuseEffectを利用
+  - https://react.dev/learn/you-might-not-need-an-effect
 - useCallback, useMemoの利用を避ける
   - パフォーマンスに問題が発生した場合のみ利用を検討する
 - propsはinterfaceではなくtypeで定義する
