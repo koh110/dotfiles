@@ -42,6 +42,10 @@ const { values } = parseArgs({
       type: 'boolean',
       short: 'c',
       default: false,
+    },
+    claude: {
+      type: 'boolean',
+      default: false,
     }
   }
 })
@@ -53,7 +57,8 @@ async function main() {
     (values.all || values.tmux) && tmux(),
     (values.all || values.zsh) && zsh(),
     (values.all || values.vim) && vim(),
-    (values.all || values.copilot) && copilot()
+    (values.all || values.copilot) && copilot(),
+    (values.all || values.claude) && claude(),
   ])
 }
 main().catch(console.error)
@@ -67,6 +72,16 @@ async function copilot() {
   })
 }
 
+async function claude() {
+  console.log('copy: claude')
+  const targetDir = join(homedir(), '.claude')
+  await mkdir(targetDir, { recursive: true })
+  await cp(join(import.meta.dirname, '.copilot/skills'), join(targetDir, 'skills'), {
+    recursive: true
+  })
+}
+
+
 async function ssh() {
   console.log('copy: ssh')
   await mkdir(`${homedir()}/.ssh`, { recursive: true })
@@ -74,7 +89,7 @@ async function ssh() {
     join(import.meta.dirname, '.ssh/config'),
     `${homedir()}/.ssh/config`,
     constants.COPYFILE_FICLONE
-)
+  )
 }
 
 async function git() {
