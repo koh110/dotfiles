@@ -4,7 +4,7 @@ description: Skills for TypeScript development, including Node.js, frontend fram
 ---
 
 - Prefer `type` over `interface`.
-- type assertion を避ける
+- type assertion を禁じる
 - 推論できる型は推論を優先して採用し、再定義を禁じる
 - baseUrlを利用しない
 - 可能な場合は必ず `as const` を記述する
