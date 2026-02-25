@@ -13,3 +13,6 @@ description: Skills for TypeScript development, including Node.js, frontend fram
   - 外部ライブラリの型定義が不完全な場合のみ、コメントで理由を明記した上で使用を許可する
 - typescriptファイルを直接実行する場合はNode.jsのstrip typesを利用する
   - `ts-node`, `tsx` の利用を禁じる
+- functionの返り値は指定せず推論に任せる
+- classを利用した設計を避ける
+  - 関数とオブジェクトリテラルを組み合わせたモジュールパターンを利用する

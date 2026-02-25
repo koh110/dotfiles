@@ -14,6 +14,8 @@ const add = (a, b) => {
 ```
 
 - filter, map, reduceなどのcallback関数はarrow functionを利用する
+- Array.prototype.forEachの利用を禁じる
+  - for...ofやforループを利用する
 - 環境変数を扱う処理はconfig.jsにまとめる
 - import/requireは相対パスを利用する
 - import/requireでindexを省略しない
