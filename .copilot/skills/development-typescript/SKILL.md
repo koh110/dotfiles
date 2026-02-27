@@ -6,6 +6,7 @@ description: Skills for TypeScript development, including Node.js, frontend fram
 - Prefer `type` over `interface`.
 - type assertion を禁じる
 - 推論できる型は推論を優先して採用し、再定義を禁じる
+- functionの返り値は指定せず推論に任せる
 - baseUrlを利用しない
 - 可能な場合は必ず `as const` を記述する
 - `any` 型の利用を禁じる
