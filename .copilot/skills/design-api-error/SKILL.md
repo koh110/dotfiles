@@ -1,6 +1,6 @@
 ---
 name: design-api-error
-description: Skills for designing API error responses, including best practices for error handling and response formatting.
+description: 'Skills for designing API error responses, including best practices for error handling and response formatting.'
 ---
 
 - APIエラーの設計は下記RFCに従う

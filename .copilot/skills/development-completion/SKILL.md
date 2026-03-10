@@ -1,6 +1,6 @@
 ---
 name: development-completion
-description: Skills for post-work completion steps.
+description: 'Skills for post-work completion steps.'
 ---
 
 - 実装完了後に必ずlint/build/testを実行し、エラーが発生しなくなるまで修正を行う

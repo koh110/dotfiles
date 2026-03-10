@@ -1,6 +1,6 @@
 ---
 name: development-javascript
-description: Skills for JavaScript development, including Node.js, frontend frameworks, and tooling.
+description: 'Skills for JavaScript development, including Node.js, frontend frameworks, and tooling.'
 ---
 
 - `"` より `'` を優先して利用する

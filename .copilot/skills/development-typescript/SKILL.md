@@ -1,6 +1,6 @@
 ---
 name: development-typescript
-description: Skills for TypeScript development, including Node.js, frontend frameworks, and tooling.
+description: 'Skills for TypeScript development, including Node.js, frontend frameworks, and tooling.'
 ---
 
 - Prefer `type` over `interface`.

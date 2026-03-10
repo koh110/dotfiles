@@ -1,6 +1,6 @@
 ---
 name: development-backend
-description: Skills for backend development, including api, databases, and server-side frameworks.
+description: 'Skills for backend development, including API, databases, and server-side frameworks.'
 ---
 
 - 互換性を考慮した実装をしない。課題に対して最適な実装を選択する

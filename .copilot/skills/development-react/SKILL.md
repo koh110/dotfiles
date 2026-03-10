@@ -1,6 +1,6 @@
 ---
 name: development-react
-description: Skills for React development guidelines.
+description: 'Guidelines for React development.'
 ---
 
 - 後方互換性は必要ない

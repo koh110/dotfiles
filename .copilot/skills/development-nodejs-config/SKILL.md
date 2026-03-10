@@ -1,6 +1,6 @@
 ---
 name: development-nodejs-config
-description: Skills for accessing env vars through config in Node.js.
+description: 'Skills for accessing env vars through config in Node.js.'
 ---
 
 - Node.js 開発では `process.env` を各所で参照することを禁じる

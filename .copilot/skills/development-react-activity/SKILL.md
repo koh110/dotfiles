@@ -1,6 +1,6 @@
 ---
 name: development-react-activity
-description: Reactコンポーネント実装時に適用する表示/非表示制御の規約。UIコンポーネントを書く際に自動的に参照される。
+description: 'Reactコンポーネント実装時に適用する表示/非表示制御の規約。UIコンポーネントを書く際に自動的に参照される。'
 ---
 
 - コンポーネントの表示/非表示の制御は React の `Activity` コンポーネントを利用する

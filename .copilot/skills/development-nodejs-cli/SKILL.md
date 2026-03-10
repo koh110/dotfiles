@@ -1,6 +1,6 @@
 ---
 name: development-nodejs-cli
-description: Skills for building Node.js CLI tools.
+description: 'Skills for building Node.js CLI tools.'
 ---
 
 - ファイルの先頭に `#!/usr/bin/env node` を付与する

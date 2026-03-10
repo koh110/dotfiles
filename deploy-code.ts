@@ -104,7 +104,6 @@ async function settings() {
             "type": "stdio",
             "command": "node",
             "args": [
-              "--experimental-strip-types",
               "--watch",
               `${homedir()}/dev/mcp-koh110/src/index.ts`
             ]

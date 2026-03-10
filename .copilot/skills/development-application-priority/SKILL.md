@@ -1,6 +1,6 @@
 ---
 name: development-application-priority
-description: アプリケーション開発時に参照するガイドライン
+description: 'アプリケーション開発時に参照するガイドライン'
 ---
 
 - 後方互換性を考慮しない
