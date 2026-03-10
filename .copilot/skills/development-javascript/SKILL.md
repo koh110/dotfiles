@@ -5,6 +5,7 @@ description: 'Skills for JavaScript development, including Node.js, frontend fra
 
 - `"` より `'` を優先して利用する
 - 文末のセミコロンは省略する
+- 関数定義はarrow functionよりnormal functionを優先する
 - arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
 
 ```javascript

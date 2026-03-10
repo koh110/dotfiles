@@ -3,8 +3,9 @@
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { mkdir, copyFile, constants, cp } from 'node:fs/promises'
+import { mkdir, cp } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
+import { deployDotfile } from './lib/dotfile-template.ts'
 
 const { values } = parseArgs({
   options: {
@@ -81,48 +82,26 @@ async function claude() {
   })
 }
 
-
 async function ssh() {
   console.log('copy: ssh')
-  await mkdir(`${homedir()}/.ssh`, { recursive: true })
-  await copyFile(
-    join(import.meta.dirname, '.ssh/config'),
-    `${homedir()}/.ssh/config`,
-    constants.COPYFILE_FICLONE
-  )
+  await deployDotfile('.ssh/config', `${homedir()}/.ssh/config`)
 }
 
 async function git() {
   console.log('copy: git')
-  await copyFile(
-    join(import.meta.dirname, '.gitconfig'),
-    `${homedir()}/.gitconfig`,
-    constants.COPYFILE_FICLONE
-  )
+  await deployDotfile('.gitconfig', `${homedir()}/.gitconfig`)
 }
 
 async function tmux() {
   console.log('copy: tmux')
-  await copyFile(
-    join(import.meta.dirname, '.tmux.conf'),
-    `${homedir()}/.tmux.conf`,
-    constants.COPYFILE_FICLONE
-  )
+  await deployDotfile('.tmux.conf', `${homedir()}/.tmux.conf`)
 }
 
 async function zsh() {
   console.log('copy: zsh')
   await Promise.all([
-    copyFile(
-      join(import.meta.dirname, '.zshenv'),
-      `${homedir()}/.zshenv`,
-      constants.COPYFILE_FICLONE
-    ),
-    copyFile(
-      join(import.meta.dirname, '.zshrc'),
-      `${homedir()}/.zshrc`,
-      constants.COPYFILE_FICLONE
-    )
+    deployDotfile('.zshenv', `${homedir()}/.zshenv`),
+    deployDotfile('.zshrc', `${homedir()}/.zshrc`)
   ])
 }
 
@@ -130,21 +109,11 @@ async function vim() {
   console.log('copy: vim')
   const VIM_DIR = `${homedir()}/.vim`
 
-  await 
-
   await Promise.all([
-    copyFile(
-      join(import.meta.dirname, '.vimrc'),
-      join(homedir(), '.vimrc'),
-      constants.COPYFILE_FICLONE
-    ),
+    deployDotfile('.vimrc', join(homedir(), '.vimrc')),
     mkdir(VIM_DIR, { recursive: true })
       .then(() =>
-        copyFile(
-          join(import.meta.dirname, '.vim/dein.toml'),
-          join(VIM_DIR, 'dein.toml'),
-          constants.COPYFILE_FICLONE
-        )
+        deployDotfile('.vim/dein.toml', join(VIM_DIR, 'dein.toml'))
       )
   ])
 }

@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import { copyFile, cp, constants, writeFile } from 'node:fs/promises'
 import { execFile as _execFile } from 'node:child_process'
 import { isWSL, getWindowsHomeDir } from './lib/wsl.ts'
+import { backupDotfile } from './lib/dotfile-template.ts'
 
 const execFile = promisify(_execFile)
 
@@ -119,17 +120,17 @@ async function vim() {
   const files = [
     {
       from: join(homedir(), '.vimrc'),
-      to: join(import.meta.dirname, '.vimrc')
+      to: '.vimrc'
     },
     {
       from: join(homedir(), '.vim/dein.toml'),
-      to: join(homedir(), '.vim/dein.toml')
+      to: '.vim/dein.toml'
     }
   ]
 
   await Promise.all(
     files.map(({ from, to }) => {
-      return copyFile(from,to, constants.COPYFILE_FICLONE)
+      return backupDotfile(from, to)
     })
   )
 }
@@ -139,26 +140,22 @@ async function zsh() {
   const files = [
     {
       from: join(homedir(), '.zshrc'),
-      to: join(import.meta.dirname, '.zshrc')
+      to: '.zshrc'
     },
     {
       from: join(homedir(), '.zshenv'),
-      to: join(import.meta.dirname, '.zshenv')
+      to: '.zshenv'
     }
   ]
 
   await Promise.all(
     files.map(({ from, to }) => {
-      return copyFile(from,to, constants.COPYFILE_FICLONE)
+      return backupDotfile(from, to)
     })
   )
 }
 
 async function tmux() {
   console.log('backup: tmux')
-  await copyFile(
-    join(homedir(), '.tmux.conf'),
-    join(import.meta.dirname, '.tmux.conf'),
-    constants.COPYFILE_FICLONE
-  )
+  await backupDotfile(join(homedir(), '.tmux.conf'), '.tmux.conf')
 }
