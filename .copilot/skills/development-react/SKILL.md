@@ -5,7 +5,7 @@ description: 'Guidelines for React development.'
 
 - 後方互換性は必要ない
 - ReactのコンポーネントはArrow Functionではなく通常のFunctionを利用する
-- 以下のガイドラインに従う
+- 以下のURLに記載されたガイドラインに従う
   - https://react.dev/learn/you-might-not-need-an-effect
 - useEffectを変更検知で利用することを禁じる
   - 下記のドキュメントを参考に必要な場合に限りuseEffectを利用
