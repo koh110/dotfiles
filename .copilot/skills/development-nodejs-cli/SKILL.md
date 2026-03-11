@@ -1,6 +1,6 @@
 ---
 name: development-nodejs-cli
-description: 'Skills for building Node.js CLI tools.'
+description: 'Use when creating Node.js CLI tools. Enforces shebang, parseArgs usage, and strip-types for TypeScript execution.'
 ---
 
 - ファイルの先頭に `#!/usr/bin/env node` を付与する

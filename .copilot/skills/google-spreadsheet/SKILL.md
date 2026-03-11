@@ -1,6 +1,6 @@
 ---
 name: google-spreadsheet
-description: 'Skills for gettting/fetching Google Spreadsheets data.'
+description: 'Use when fetching data from Google Spreadsheets via the spreadsheet-cli tool.'
 ---
 
 # Google Spreadsheets のデータを取得

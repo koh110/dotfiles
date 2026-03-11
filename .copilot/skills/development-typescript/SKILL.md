@@ -1,6 +1,6 @@
 ---
 name: development-typescript
-description: 'Skills for TypeScript development, including Node.js, frontend frameworks, and tooling.'
+description: 'Use when writing or editing TypeScript code. Enforces type inference, type-safe patterns, and module conventions.'
 ---
 
 - Prefer `type` over `interface`.

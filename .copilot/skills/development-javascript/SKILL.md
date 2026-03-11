@@ -1,6 +1,6 @@
 ---
 name: development-javascript
-description: 'Skills for JavaScript development, including Node.js, frontend frameworks, and tooling.'
+description: 'Use when writing or editing JavaScript/Node.js code. Enforces coding style, module conventions, and package.json standards.'
 ---
 
 - `"` より `'` を優先して利用する
@@ -17,9 +17,19 @@ const add = (a, b) => {
 - filter, map, reduceなどのcallback関数はarrow functionを利用する
 - Array.prototype.forEachの利用を禁じる
   - for...ofやforループを利用する
-- 環境変数を扱う処理はconfig.jsにまとめる
 - import/requireは相対パスを利用する
 - import/requireでindexを省略しない
+
+## Environment Variables
+
+- `process.env` を各所で参照することを禁じる
+- 環境変数は `config.ts` または `config.js` からのみ読み取る
+- 他のモジュールは `config` を import して値を参照する
+
+## Scripting
+
+- 使い捨てのスクリプトを作成・実行する場合は最新バージョンのNode.jsを利用する
+- 一時的な自動化でもPythonやBashでの実装を禁じる
 
 ## package.json Guidelines
 
