@@ -1,12 +1,12 @@
 ---
 name: development-javascript
-description: 'Use when writing or editing JavaScript/Node.js code. Enforces coding style, module conventions, and package.json standards.'
+description: 'Use when writing or editing JavaScript/TypeScript/Node.js code. Enforces coding style, module conventions, and package.json standards.'
 ---
 
 - `"` より `'` を優先して利用する
 - 文末のセミコロンは省略する
-- 関数定義はarrow functionよりnormal functionを優先する
-- arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
+- classを利用した設計を避ける
+  - 関数とオブジェクトリテラルを組み合わせたモジュールパターンを利用する
 
 ```javascript
 const add = (a, b) => {
@@ -14,7 +14,9 @@ const add = (a, b) => {
 }
 ```
 
-- filter, map, reduceなどのcallback関数はarrow functionを利用する
+- 関数定義はarrow functionよりnormal functionを優先する
+  - filter, map, reduceなどのcallback関数はarrow functionを利用する
+- arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
 - Array.prototype.forEachの利用を禁じる
   - for...ofやforループを利用する
 - import/requireは相対パスを利用する
@@ -49,3 +51,23 @@ const add = (a, b) => {
   "type": "module"
 }
 ```
+
+## test Guidelines
+
+- `describe` を利用しない。`test` をファイルのルートレベルに記述する
+- テストをグルーピングしたい場合は `describe` ではなくテストファイル自体を分離する
+
+## TypeScript Guidelines
+
+- Prefer `type` over `interface`.
+- type assertion を禁じる
+- 推論できる型は推論を優先して採用し、再定義を禁じる
+- functionの返り値は指定せず推論に任せる
+- baseUrlを利用しない
+- 可能な場合は必ず `as const` を記述する
+- `any` 型の利用を禁じる
+  - やむをえない場合は `unknown` 型を利用し、type guardで型を絞り込む
+  - 外部ライブラリの型定義が不完全な場合のみ、コメントで理由を明記した上で使用を許可する
+- typescriptファイルを直接実行する場合はNode.jsのstrip typesを利用する
+  - `ts-node`, `tsx` の利用を禁じる
+- functionの返り値は指定せず推論に任せる
