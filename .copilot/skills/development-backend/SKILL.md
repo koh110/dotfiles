@@ -9,9 +9,5 @@ description: 'Use when writing or editing API handlers, database queries, or ser
 ## Error Response Guidelines
 
 - APIエラーの設計は下記RFCに従う
-  - RFC 9457: Problem Details for HTTP APIs
-  - RFC 9205: Building Protocols with HTTP
-
-### ref
-- https://www.rfc-editor.org/rfc/rfc9457
-- https://www.rfc-editor.org/rfc/rfc9205
+  - [RFC 9457: Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457)
+  - [RFC 9205: Building Protocols with HTTP](https://www.rfc-editor.org/rfc/rfc9205)

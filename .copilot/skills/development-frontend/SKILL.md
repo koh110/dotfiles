@@ -11,9 +11,8 @@ description: 'Use when writing or editing frontend components, pages, or UI logi
 ## Zod Guidelines
 
 - zodを利用する場合は `zod/mini` を利用する
-  - 利用の仕方は下記ドキュメントを参照
-  - https://zod.dev/packages/mini
   - `import * as z from 'zod/mini'`
+  - ref: https://zod.dev/packages/mini
 
 ## React Guidelines
 
@@ -21,7 +20,7 @@ description: 'Use when writing or editing frontend components, pages, or UI logi
 - ReactのコンポーネントはArrow Functionではなく通常のFunctionを利用する
 - useEffectを変更検知で利用することを禁じる
   - 下記のドキュメントを参考に必要な場合に限りuseEffectを利用
-  - https://react.dev/learn/you-might-not-need-an-effect
+  - ref: https://react.dev/learn/you-might-not-need-an-effect
 - useEffectでAPI Callすることを禁じる
 - useCallback, useMemoの利用を避ける
   - パフォーマンスに問題が発生した場合のみ利用を検討する
