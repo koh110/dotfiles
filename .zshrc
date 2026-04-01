@@ -1,6 +1,11 @@
 # 補完
 autoload -U compinit
-compinit
+# 1日1回だけ補完ファイルを再生成、それ以外はキャッシュを使用
+if [[ -n ~/.zcompdump(#qN.mh+24) ]]; then
+  compinit
+else
+  compinit -C
+fi
 ## 小文字/大文字両方補完
 #zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
 ## sudo の後ろでコマンド名を補完する
