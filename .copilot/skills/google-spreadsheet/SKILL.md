@@ -9,7 +9,7 @@ description: 'Use when fetching data from Google Spreadsheets or writing to Goog
 
 ```bash
 # read
-$ node ~/dev/spreadsheet-cli/src/index.ts read --spreadsheet-id {{id}} --range 'シート1!A1:I50' --json
+$ node ~/dev/spreadsheet-cli/src/index.ts read --spreadsheet-id {{id}} --range 'シート1!A1:I50' --format=json
 # write
 $ node ~/dev/spreadsheet-cli/src/index.ts write --spreadsheet-id {{id}} --range 'シート1!A1:I50'
 ```
