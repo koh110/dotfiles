@@ -7,6 +7,7 @@ description: 'Use when writing or editing frontend components, pages, or UI logi
 
 - 共通UIを優先して利用する
 - 共通するデザイン等は共通UIにリファクタリングする
+- client sideでのformはreact-hook-formを利用する
 
 ## Zod Guidelines
 
@@ -31,3 +32,21 @@ description: 'Use when writing or editing frontend components, pages, or UI logi
   - `{condition && <Component />}` のような条件付きレンダリングではなく Activity を優先する
   - type が絞り込めないケース（例: `null` から non-null への型ナローイング）のみ Activity を利用しない
 - コンポーネントをArray.prototype.mapで描画する場合のcallback関数は必ず `{}`, `return` を用いて記述する
+
+## React Hook Form Guidelines
+
+- formデータの保持にuseStateを利用せず、react-hook-formの機能を活用する
+- checkboxやselect等のフォーム要素は `register` で直接バインドし、`watch` + `setValue` による手動ハンドリングを避ける
+- フォーム全体のリセットは `reset()` ではなく、React の `key` を更新してコンポーネントを再マウントする
+
+## Next.js Guidelines
+
+- Next.jsのベストプラクティスに従う
+- ページ単位でのみ共通のUIは各pageをバーチャルルートで共通化し、`{pagedir}/_components/index.ts` にまとめる
+- API通信パターン
+  - **GET（データ取得）**: Server Actions（`actions.ts`）で実装する
+    - `'use server'` + `server-only` で認証・キャッシュタグ管理をサーバーサイドで行う
+    - `Result<T, string>` 型で返す
+  - **POST/PUT/DELETE（データ変更）**: Proxy経由のクライアントサイド関数で実装する
+    - `features/` 配下のclient.tsにAPI関数を定義し、`/proxy/api/...` 経由でリクエストする
+    - ダイアログコンポーネントでは `onSubmit` + `useState` で状態管理し、成功時は `onSuccess` コールバックで親に通知する

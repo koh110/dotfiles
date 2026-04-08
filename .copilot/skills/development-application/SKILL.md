@@ -1,6 +1,6 @@
 ---
 name: development-application
-description: 'アプリケーション開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行う。'
+description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行う。'
 ---
 
 ## General Guidelines
@@ -9,6 +9,8 @@ description: 'アプリケーション開発時に参照する全般に適用さ
 - 既存実装の延命より作り直しを優先する
 - 移行コストより新規実装の保守性と単純性を優先する
 - 互換レイヤーや段階的フォールバックを追加しない
+- O(N) となる処理を避け、O(1) となるように処理を記述する
+- ループ処理の内部でSQLのINSERT/UPDATE/DELETEを繰り返し実行することを禁じる
 
 ## Completion
 
@@ -16,3 +18,9 @@ description: 'アプリケーション開発時に参照する全般に適用さ
   - testやlintの実行はciのコマンドを参照して実行する
   - lintのエラーの場合まずは自動修正を試みる
 - 実現した仕様を最後に簡潔に説明する
+
+## Error Response Guidelines
+
+- APIエラーの設計は下記RFCに従う
+  - [RFC 9457: Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457)
+  - [RFC 9205: Building Protocols with HTTP](https://www.rfc-editor.org/rfc/rfc9205)
