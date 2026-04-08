@@ -1,6 +1,6 @@
 ---
 name: development-javascript
-description: 'Use when writing or editing JavaScript/TypeScript/Node.js code. Enforces coding style, module conventions, package.json standards, and Node.js CLI tool patterns.'
+description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creating Node.js CLI tools, or modifying package.json. Enforces coding style, module conventions, package.json standards, and Node.js CLI tool patterns.'
 ---
 
 - `"` より `'` を優先して利用する

@@ -37,6 +37,9 @@ description: 'Use when writing or editing frontend components, pages, or UI logi
 
 - formデータの保持にuseStateを利用せず、react-hook-formの機能を活用する
 - checkboxやselect等のフォーム要素は `register` で直接バインドし、`watch` + `setValue` による手動ハンドリングを避ける
+- input タグには `value` ではなく `defaultValue` を使用する（`value` はユーザー操作を上書きする可能性がある）
+- checkbox配列の `defaultValues` はDOM valueと型を一致させる（DOM valueは常に `string` のため、`string[]` で定義する）
+  - submit時に `data.organizationIds.map(Number)` 等で数値変換する
 - フォーム全体のリセットは `reset()` ではなく、React の `key` を更新してコンポーネントを再マウントする
 
 ## Next.js Guidelines
