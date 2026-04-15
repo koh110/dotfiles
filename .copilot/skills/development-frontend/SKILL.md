@@ -1,6 +1,6 @@
 ---
 name: development-frontend
-description: 'Use when writing or editing frontend components, pages, or UI logic with React or Vue. Enforces zod/mini validation, shared UI conventions, and React best practices including Activity, useEffect restrictions, and component patterns.'
+description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or editing React components, writing JSX with conditional rendering, or modifying pages/layouts in Next.js. Enforces zod/mini validation, shared UI conventions, and React best practices including Activity for show/hide, useEffect restrictions, and component patterns.'
 ---
 
 ## General Guidelines
