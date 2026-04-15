@@ -68,7 +68,7 @@ alias zcolor='for c in {000..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($c%16)) 
 alias zcolora='for c in {016..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($((c-16))%6)) -eq 5 ] && echo;done;echo'
 alias json="node -e 'd=\"\";process.stdin.resume();process.stdin.on(\"data\",c => d+=c);process.stdin.on(\"end\", () => console.dir(JSON.parse(d), {colors:true,depth:5}))'"
 alias ghpo="git push origin $(git branch --show-current) --force-with-lease"
-alias ghprc="gh pr create --base main --head $(git branch --show-current)"
+alias ghprc="gh pr create --base main $(git branch --show-current)"
 
 # zsh options
 setopt auto_cd              # ディレクトリのみで移動
