@@ -53,3 +53,13 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
   - **POST/PUT/DELETE（データ変更）**: Proxy経由のクライアントサイド関数で実装する
     - `features/` 配下のclient.tsにAPI関数を定義し、`/proxy/api/...` 経由でリクエストする
     - ダイアログコンポーネントでは `onSubmit` + `useState` で状態管理し、成功時は `onSuccess` コールバックで親に通知する
+
+## Mandatory Skill Enforcement
+
+- このskillがloadされたら、実装前に以下の禁止事項を内部チェックリストとして固定し、実装中に見失わないこと
+  - `useEffect` を変更検知で使わない
+  - `useEffect` で API call しない
+  - `{condition && <Component />}` を安易に使わず `Activity` を優先する
+- `.tsx` / `.jsx` を変更した場合、完了報告前に **変更した各ファイル** を再読し、上記禁止事項に違反していないか必ず確認すること
+- 1つでも違反が見つかった場合、その時点で「未完了」とみなし、説明より先に実装修正を優先すること
+- 特に `useEffect(` を追加・変更した場合は、「変更検知か」「API callか」を明示的に自己監査し、どちらかに該当するなら削除または別設計へ置き換えること

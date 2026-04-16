@@ -125,3 +125,8 @@ main().catch(console.error)
   }
 }
 ```
+
+## Mandatory Skill Enforcement
+
+- このskillがloadされたら、変更した `.ts` / `.js` ファイルを完了前に再読し、このskillの禁止事項に違反していないか必ず確認すること
+- skill違反が見つかった場合、その時点で未完了として扱い、説明や完了報告より先に修正すること
