@@ -26,7 +26,7 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
 - useCallback, useMemoの利用を避ける
   - パフォーマンスに問題が発生した場合のみ利用を検討する
 - propsはinterfaceではなくtypeで定義する
-- propsの型定義はAPIのレスポンスから推論する
+- 既に存在する型は再定義を禁じ推論で導出する（propsに限らずコンポーネント内のすべての型に適用）
 - コンポーネント表示/非表示の制御はActivityコンポーネントを利用する
   - `<Activity mode={condition ? 'visible' : 'hidden'}>` パターンを使用する
   - `{condition && <Component />}` のような条件付きレンダリングではなく Activity を優先する

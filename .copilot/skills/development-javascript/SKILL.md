@@ -3,17 +3,22 @@ name: development-javascript
 description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creating Node.js CLI tools, or modifying package.json. Enforces coding style, module conventions, package.json standards, and Node.js CLI tool patterns.'
 ---
 
-- `"` より `'` を優先して利用する
-- 文末のセミコロンは省略する
+## General Guidelines (must)
+
 - classを利用した設計を避ける
   - 関数とオブジェクトリテラルを組み合わせたモジュールパターンを利用する
+- import/requireは相対パスを利用する
+- import/requireでindexを省略しない
+- Array.prototype.forEachの利用を禁じる
+  - for...ofやforループを利用する
+
+## Style Guidelines (should)
+
+- `"` より `'` を優先して利用する
+- 文末のセミコロンは省略する
 - 関数定義はarrow functionよりnormal functionを優先する
   - filter, map, reduceなどのcallback関数はarrow functionを利用する
 - arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
-- Array.prototype.forEachの利用を禁じる
-  - for...ofやforループを利用する
-- import/requireは相対パスを利用する
-- import/requireでindexを省略しない
 
 ## Environment Variables
 
@@ -48,7 +53,8 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 
 - Prefer `type` over `interface`
 - type assertion を禁じる
-- 推論できる型は推論を優先して採用し、再定義を禁じる
+- 既に存在する型は再定義せず推論で導出し再定義を禁じる（対象を限らずすべての型に適用）
+  - 詳細は [references/type-inference.md](references/type-inference.md) を参照
 - functionの返り値は指定せず推論に任せる
 - baseUrlを利用しない
 - 可能な場合は必ず `as const` を記述する
