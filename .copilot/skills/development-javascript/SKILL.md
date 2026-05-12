@@ -48,6 +48,10 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 
 - `describe` を利用しない。`test` をファイルのルートレベルに記述する
 - テストをグルーピングしたい場合は `describe` ではなくテストファイル自体を分離する
+- グローバル setup ファイル (`setup.ts` / `globalSetup` 等) でモジュールをモック化しない
+  - グローバルモックは依存関係を不可視にし、特定テストで実物が必要になった際の解除が複雑化する
+  - モックが必要なテストファイルに `vi.mock(...)` を記述して局所化する
+  - 同じモックを複数ファイルで使う場合は、共通の mock factory を関数として export し各テストファイルから呼び出す
 
 ## TypeScript Guidelines
 
