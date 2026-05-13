@@ -49,9 +49,15 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 - `describe` を利用しない。`test` をファイルのルートレベルに記述する
 - テストをグルーピングしたい場合は `describe` ではなくテストファイル自体を分離する
 - グローバル setup ファイル (`setup.ts` / `globalSetup` 等) でモジュールをモック化しない
-  - グローバルモックは依存関係を不可視にし、特定テストで実物が必要になった際の解除が複雑化する
-  - モックが必要なテストファイルに `vi.mock(...)` を記述して局所化する
+  - グローバルモックは依存関係を不可視にし、特定テストで実物が必要になった際の解除 (unmock) が複雑化する
+  - モックが必要なテストファイルに `vi.mock(...)` 等の mock を記述して局所化する
   - 同じモックを複数ファイルで使う場合は、共通の mock factory を関数として export し各テストファイルから呼び出す
+- DBや外部リソースを共有するテスト同士の干渉を防ぐため「並列耐性」のある形で記述する
+  - 同一ファイル内で固有のprefixを共有することを禁じる。テスト毎に `task.id` などのtestごとに unique となる値を prefix として利用し、seed を分離する
+  - `beforeAll` で共通の seed データを作成することを禁じる。`beforeAll` は接続と必要最小限の truncate のみに留め、seed は各テスト内で `task.id` prefix を付けて作成する
+  - 共有リソース全体に依存する assertion (例: `count`, `length`) を禁じる。`find()` 等で自テストが作成したレコードのみを対象に assertion する
+  - pagination 等のため大量データ (例: PAGE_SIZE 超え) を投入することを禁じる。境界値テストは別途専用環境が必要なら省略するか、件数に依存しない代替検証 (skip が効くか) で代用する
+- サンプルとNGパターンは [references/tests.md](references/tests.md) を参照
 
 ## TypeScript Guidelines
 
