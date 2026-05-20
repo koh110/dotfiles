@@ -39,6 +39,10 @@ const { values } = parseArgs({
       short: 'c',
       default: false,
     },
+    config: {
+      type: 'boolean',
+      default: false,
+    }
   }
 })
 
@@ -48,7 +52,8 @@ async function main() {
     (values.all || values.tmux) && tmux(),
     (values.all || values.zsh) && zsh(),
     (values.all || values.code) && code(),
-    (values.all || values.code) && codeExtension()
+    (values.all || values.code) && codeExtension(),
+    (values.all || values.config) && dotConfig()
   ])
 }
 main().catch(console.error)
@@ -89,7 +94,7 @@ async function code() {
 
   await Promise.all([
     ...files.map(({ from, to }) => {
-      return copyFile(from,to, constants.COPYFILE_FICLONE)
+      return copyFile(from, to, constants.COPYFILE_FICLONE)
     }),
     ...directories.map(({ from, to }) => {
       return cp(from, to, {
@@ -158,4 +163,23 @@ async function zsh() {
 async function tmux() {
   console.log('backup: tmux')
   await backupDotfile(join(homedir(), '.tmux.conf'), '.tmux.conf')
+}
+
+async function dotConfig() {
+  const DOT_CONFIG_DIR = join(homedir(), '.config')
+  const TARGET_DIR = `${import.meta.dirname}/.config`
+
+  const ghostty = join(DOT_CONFIG_DIR, 'ghostty')
+  const files = [
+    {
+      from: join(ghostty, 'config'),
+      to: join(TARGET_DIR, 'ghostty/config')
+    }
+  ]
+
+  await Promise.all(
+    files.map(({ from, to }) => {
+      return copyFile(from, to, constants.COPYFILE_FICLONE)
+    })
+  )
 }
