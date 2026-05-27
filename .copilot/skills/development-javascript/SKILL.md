@@ -31,6 +31,23 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 - 使い捨てのスクリプトを作成・実行する場合は最新バージョンのNode.jsを利用する
 - 一時的な自動化でもPythonやBashでの実装を禁じる
 
+## npm Guidelines
+
+- .npmrcをプロジェクトルートに配置し、必要に応じて以下の設定を記述する
+  - `min-release-age=7` を記述してリリース後すぐのバージョンを避ける
+
+```bash
+# .npmrc
+min-release-age=7
+```
+
+Dockerfile内でnpmを利用する場合は、`npm install` の前に `.npmrc` をコピーして設定を反映させる.
+また、.npmrcのビルド忘れを防ぐために `min-release-age` だけはDockerfileのnpm installコマンドにも直接渡す.
+
+```dockerfile
+RUN npm install --min-release-age=7
+``
+
 ## package.json Guidelines
 
 - はじめてpackage.jsonを作成する場合は下記のみで構成する
