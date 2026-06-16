@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { mkdir, cp } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { deployDotfile } from './lib/dotfile-template.ts'
+import { deployCodexConfig } from './lib/codex-config.ts'
 
 const { values } = parseArgs({
   options: {
@@ -47,6 +48,10 @@ const { values } = parseArgs({
     claude: {
       type: 'boolean',
       default: false,
+    },
+    codex: {
+      type: 'boolean',
+      default: false,
     }
   }
 })
@@ -60,26 +65,36 @@ async function main() {
     (values.all || values.vim) && vim(),
     (values.all || values.copilot) && copilot(),
     (values.all || values.claude) && claude(),
+    (values.all || values.codex) && codex(),
   ])
 }
 main().catch(console.error)
 
-async function copilot() {
-  console.log('copy: copilot')
-  const targetDir = join(homedir(), '.copilot')
+async function deploySkills(name: string, targetDirName: string) {
+  console.log('copy: ' + name)
+  const targetDir = join(homedir(), targetDirName)
   await mkdir(targetDir, { recursive: true })
-  await cp(join(import.meta.dirname, '.copilot/skills'), join(targetDir, 'skills'), {
+  await cp(join(import.meta.dirname, 'skills'), join(targetDir, 'skills'), {
     recursive: true
   })
 }
 
+async function copilot() {
+  await deploySkills('copilot', '.copilot')
+}
+
 async function claude() {
-  console.log('copy: claude')
-  const targetDir = join(homedir(), '.claude')
-  await mkdir(targetDir, { recursive: true })
-  await cp(join(import.meta.dirname, '.copilot/skills'), join(targetDir, 'skills'), {
-    recursive: true
-  })
+  await deploySkills('claude', '.claude')
+}
+
+async function codex() {
+  await Promise.all([
+    deploySkills('codex', '.codex'),
+    deployCodexConfig(
+      join(import.meta.dirname, '.codex/config.toml'),
+      join(homedir(), '.codex/config.toml')
+    ),
+  ])
 }
 
 async function ssh() {
