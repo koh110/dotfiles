@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { mkdir, cp } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { deployDotfile } from './lib/dotfile-template.ts'
+import { deployCodexConfig } from './lib/codex-config.ts'
 
 const { values } = parseArgs({
   options: {
@@ -87,7 +88,13 @@ async function claude() {
 }
 
 async function codex() {
-  await deploySkills('codex', '.codex')
+  await Promise.all([
+    deploySkills('codex', '.codex'),
+    deployCodexConfig(
+      join(import.meta.dirname, '.codex/config.toml'),
+      join(homedir(), '.codex/config.toml')
+    ),
+  ])
 }
 
 async function ssh() {
