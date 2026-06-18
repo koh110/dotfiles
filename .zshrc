@@ -55,10 +55,64 @@ if is-at-least 4.3.10; then
   zstyle ':vcs_info:git:*' formats       '%F{green}(%s)-[%b]%f %F{magenta}%c%u%f'
   zstyle ':vcs_info:git:*' actionformats '%F{green}(%s)-[%b|%a]%f %F{magenta}%c%u%f'
 fi
+function tmux_context_theme_values() {
+    local host="$1"
+    local pane_bg="default"
+    local active_bg="default"
+    local status_bg="colour236"
+    local status_left_fg="colour255"
+    local current_window_bg="colour27"
+    local current_window_fg="colour255"
+
+    case "$host" in
+        dev-server)
+            pane_bg="colour18"
+            active_bg="colour18"
+            status_bg="colour25"
+            current_window_bg="colour32"
+            ;;
+        guest)
+            pane_bg="colour52"
+            active_bg="colour52"
+            status_bg="colour88"
+            current_window_bg="colour124"
+            ;;
+    esac
+
+    print -r -- "$pane_bg $active_bg $status_bg $status_left_fg $current_window_bg $current_window_fg"
+}
+
+function tmux_apply_context_theme() {
+    [[ -z "$TMUX" ]] && return 0
+
+    local host="${HOST%%.*}"
+    local theme_key="$host"
+    [[ "$TMUX_CONTEXT_THEME_KEY" == "$theme_key" ]] && return 0
+
+    local values pane_bg active_bg status_bg status_left_fg current_window_bg current_window_fg
+    values=(${(z)$(tmux_context_theme_values "$host")})
+    pane_bg="$values[1]"
+    active_bg="$values[2]"
+    status_bg="$values[3]"
+    status_left_fg="$values[4]"
+    current_window_bg="$values[5]"
+    current_window_fg="$values[6]"
+
+    tmux set-window-option -g window-style "bg=${pane_bg},fg=default" >/dev/null 2>&1
+    tmux set-window-option -g window-active-style "bg=${active_bg},fg=default" >/dev/null 2>&1
+    tmux set-option -g status-style "bg=${status_bg},fg=${status_left_fg}" >/dev/null 2>&1
+    tmux set-option -g status-left "#{?client_prefix,#[reverse],}#[fg=${status_left_fg},bg=${status_bg}] Session: #S #[default]" >/dev/null 2>&1
+    tmux set-option -g status-right "#{?client_prefix,#[reverse],}#[fg=${status_left_fg},bg=${status_bg}] #H | %Y/%m/%d(%a) %H:%M:%S #[default]" >/dev/null 2>&1
+    tmux set-window-option -g window-status-current-format "#[fg=${current_window_fg},bg=${current_window_bg},bold] #I: #W#{?window_zoomed_flag, [z],} #[default]" >/dev/null 2>&1
+
+    export TMUX_CONTEXT_THEME_KEY="$theme_key"
+}
+
 precmd () {
     psvar=()
     LANG=en_US.UTF-8 vcs_info
     psvar[1]="$vcs_info_msg_0_"
+    tmux_apply_context_theme
 }
 PROMPT=$'%{${fg_bold[red]}%}${USER}@${HOST}%{${reset_color}%} %{${fg[blue]}%}%~%{${reset_color}%} %1(v|$psvar[1]|)\n%(!.#.$) '
 
@@ -107,7 +161,7 @@ function is_screen_running() { [ ! -z "$STY" ]; }
 function is_tmux_runnning() { [ ! -z "$TMUX" ]; }
 function is_screen_or_tmux_running() { is_screen_running || is_tmux_runnning; }
 function shell_has_started_interactively() { [ ! -z "$PS1" ]; }
-function is_ssh_running() { [ ! -z "$SSH_CONECTION" ]; }
+function is_ssh_running() { [ ! -z "$SSH_CONNECTION" ]; }
 
 function tmux_automatically_attach_session()
 {
