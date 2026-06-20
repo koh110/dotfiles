@@ -40,6 +40,10 @@ const { values } = parseArgs({
       short: 'v',
       default: false,
     },
+    ghostty: {
+      type: 'boolean',
+      default: false,
+    },
     copilot: {
       type: 'boolean',
       short: 'c',
@@ -63,6 +67,7 @@ async function main() {
     (values.all || values.tmux) && tmux(),
     (values.all || values.zsh) && zsh(),
     (values.all || values.vim) && vim(),
+    (values.all || values.ghostty) && ghostty(),
     (values.all || values.copilot) && copilot(),
     (values.all || values.claude) && claude(),
     (values.all || values.codex) && codex(),
@@ -131,4 +136,12 @@ async function vim() {
         deployDotfile('.vim/dein.toml', join(VIM_DIR, 'dein.toml'))
       )
   ])
+}
+
+async function ghostty() {
+  console.log('copy: ghostty')
+  await deployDotfile(
+    '.config/ghostty/config',
+    join(homedir(), '.config/ghostty/config')
+  )
 }
