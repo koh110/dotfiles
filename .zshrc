@@ -123,6 +123,7 @@ alias zcolora='for c in {016..255}; do echo -n "\e[38;5;${c}m $c" ; [ $(($((c-16
 alias json="node -e 'd=\"\";process.stdin.resume();process.stdin.on(\"data\",c => d+=c);process.stdin.on(\"end\", () => console.dir(JSON.parse(d), {colors:true,depth:5}))'"
 alias ghpo="git push origin $(git branch --show-current) --force-with-lease"
 alias ghprc="gh pr create --base main $(git branch --show-current)"
+alias fssha='eval "$(tmux show-environment -s SSH_AUTH_SOCK)" && ssh-add -l'
 
 # zsh options
 setopt auto_cd              # ディレクトリのみで移動
