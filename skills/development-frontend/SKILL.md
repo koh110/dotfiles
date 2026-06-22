@@ -32,6 +32,7 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
   - type が絞り込めないケース（例: `null` から non-null への型ナローイング）のみ Activity を利用しない
 - コンポーネントをArray.prototype.mapで描画する場合のcallback関数は必ず `{}`, `return` を用いて記述する
 - client sideでのformはreact-hook-formを利用する
+- componentのresetは対象コンポーネントのkeyを変更して行う
 
 ## React Hook Form Guidelines
 
