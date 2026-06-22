@@ -7,7 +7,6 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
 
 - 共通UIを優先して利用する
 - 共通するデザイン等は共通UIにリファクタリングする
-- client sideでのformはreact-hook-formを利用する
 
 ## Zod Guidelines
 
@@ -32,6 +31,7 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
   - `{condition && <Component />}` のような条件付きレンダリングではなく Activity を優先する
   - type が絞り込めないケース（例: `null` から non-null への型ナローイング）のみ Activity を利用しない
 - コンポーネントをArray.prototype.mapで描画する場合のcallback関数は必ず `{}`, `return` を用いて記述する
+- client sideでのformはreact-hook-formを利用する
 
 ## React Hook Form Guidelines
 
