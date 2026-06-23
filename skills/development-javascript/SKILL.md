@@ -91,6 +91,7 @@ RUN npm install --min-release-age=7
 - TypeScriptファイルを直接実行する場合はNode.jsのstrip-typesを利用する
   - `ts-node`, `tsx` の利用を禁じる
   - ref: https://nodejs.org/docs/api/typescript.html
+- Array.prototype.filterではできる限り型推論に任せ `is` を利用しない
 
 ## Node.js CLI Tool Guidelines
 
