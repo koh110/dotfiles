@@ -38,7 +38,9 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
 
 - formデータの保持にuseStateを利用せず、react-hook-formの機能を活用する
 - checkboxやselect等のフォーム要素は `register` で直接バインドし、`watch` + `setValue` による手動ハンドリングを禁じる
-- input タグには `value` ではなく `defaultValue` を使用する（`value` はユーザー操作を上書きする可能性がある）
+- input, select 等のtagを利用する共通コンポーネントは `value` での制御ではなく `defaultValue` を使用する（`value` はユーザー操作を上書きする可能性がある）
+  - 既存の `defaultValue` ベースの共通コンポーネントを `value` 制御へ変更しない（破壊的 API 変更になり他の利用箇所を壊す）
+  - 値のクリアやリセットは `value=''` 制御ではなく React の `key` 更新による再マウントで行う
 - checkbox配列の `defaultValues` はDOM valueと型を一致させる（DOM valueは常に `string` のため、`string[]` で定義する）
   - submit時に `data.organizationIds.map(Number)` 等で数値変換する
 - フォーム全体のリセットは `reset()` ではなく、React の `key` を更新してコンポーネントを再マウントする
