@@ -1,6 +1,6 @@
 ---
 name: development-application
-description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行う。'
+description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、再利用可能な学びはskillへ反映する。'
 ---
 
 ## General Guidelines
@@ -29,6 +29,13 @@ CREATE TYPE import_config_status AS ENUM ('active', 'disabled');
 -- 将来: ALTER TYPE import_config_status ADD VALUE 'archived'; で無停止追加可能
 status import_config_status NOT NULL DEFAULT 'active'
 ```
+
+## Skill Feedback
+
+- 作業中に再利用可能な修正・不足手順・新しい pitfall・変更された運用ルール・より良い完了条件を見つけたら、関連 skill の更新をユーザーに提案することを作業完了条件に含める
+- 既存 skill の修正で足りるなら patch し、既存の受け皿がない再利用可能な手順なら新しい skill を作る
+- 判断に迷う場合は `skill-feedback-criteria` を参照し、skill に反映すべきでない場合でも durable な記録へ残すべきかを判断する
+- skill を更新できなかった場合は、その理由と暫定的に残した記録先を完了報告に明記する
 
 ## Completion
 
