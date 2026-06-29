@@ -1,9 +1,11 @@
 approval_policy = "on-request"
-approvals_reviewer = "auto_review"
 default_permissions = "workspace_network"
-glob_scan_max_depth = 8
+approvals_reviewer = "auto_review"
+model_reasoning_effort = "medium"
+web_search = "live"
 
 [permissions.workspace_network.filesystem]
+glob_scan_max_depth = 8
 ":minimal" = "read"
 ":tmpdir" = "write"
 ":slash_tmp" = "write"
@@ -11,8 +13,13 @@ glob_scan_max_depth = 8
 
 [permissions.workspace_network.filesystem.":workspace_roots"]
 "." = "write"
+".git" = "write"
+".codex" = "write"
 ".env" = "deny"
 "**/.env" = "deny"
 
 [permissions.workspace_network.network]
 enabled = true
+mode = "full"
+allow_local_binding = true
+
