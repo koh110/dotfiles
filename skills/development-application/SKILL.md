@@ -3,6 +3,11 @@ name: development-application
 description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、再利用可能な学びはskillへ反映する。'
 ---
 
+## Specification First
+
+- アプリケーション・新機能の作成依頼で仕様が曖昧な場合、実装や plan 作成に着手する前に `spec-drilldown` skill を実行し、仕様を磨き込んでから実装する
+- 承認された仕様書なしに新規作成の実装を始めない（明確な bugfix や仕様の自由度がない作業は除く）
+
 ## General Guidelines
 
 - 作業報告をする際に何が保証され、特に **何を保証していないか** を説明する
