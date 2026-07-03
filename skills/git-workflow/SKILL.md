@@ -36,6 +36,7 @@ description: 'TRIGGER when: git repository で状態確認、branch 作成、差
 
 - コード変更を伴う作業では、`git worktree list` と `git status --short` を確認してから worktree を作る
 - repository root に `.worktree/` がなければ作る
+- worktreeはremoteの最新 `main` ブランチから開始する
 - `.worktree/` 配下へ専用 worktree を作る
 - 新しい worktree に移動してから編集を始める
 
