@@ -56,6 +56,19 @@ cd .worktree/feature-short-name
 - root checkout 側の重複変更を除去する
 - root checkout は feature 完了まで作業場所として使わない
 
+移植手順（stash は worktree 間で共有されるためこの順で安全に移せる）:
+
+```bash
+# root checkout で（untracked も含めて退避）
+git stash push --include-untracked -m 'move to worktree'
+git worktree add .worktree/feature-short-name -b feature/short-name
+cd .worktree/feature-short-name
+git stash pop
+# pop が成功したことと root checkout が clean になったことを両方確認する
+git status --short
+git -C ../.. status --short
+```
+
 ## Commit / Rebase / Push Guidelines
 
 - status を見ずに commit しない
@@ -72,6 +85,14 @@ cd .worktree/feature-short-name
 - `.worktree/` 自体を誤って消さない
 - `git clean` は対象に untracked で残したい file がないか確認してから実行する
 - root checkout の status に `.worktree/` が出る場合は、repository の local exclude で隠すことを優先する
+  - `.gitignore` を変更せずに隠すには root checkout で `echo '.worktree/' >> .git/info/exclude`
+- merge 済みの worktree を片付ける場合は、worktree 内に未 commit / 未 push の変更がないことを確認してから以下を実行する
+
+```bash
+git -C .worktree/feature-short-name status --short   # 空であることを確認
+git worktree remove .worktree/feature-short-name
+git branch -d feature/short-name                     # 未mergeなら失敗する(-D で強制しない)
+```
 
 ## Common Pitfalls
 

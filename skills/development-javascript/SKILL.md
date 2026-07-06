@@ -20,6 +20,19 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
   - filter, map, reduceなどのcallback関数はarrow functionを利用する
 - arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
 
+上記スタイルをすべて満たす例:
+
+```typescript
+function listActiveNames(users: User[]) {
+  const active = users.filter((user) => {
+    return user.active
+  })
+  return active.map((user) => {
+    return user.name
+  })
+}
+```
+
 ## Environment Variables
 
 - `process.env` を各所で参照することを禁じる
@@ -46,7 +59,7 @@ Dockerfile内でnpmを利用する場合は、`npm install` の前に `.npmrc` �
 
 ```dockerfile
 RUN npm install --min-release-age=7
-``
+```
 
 ## package.json Guidelines
 
@@ -104,40 +117,54 @@ Node.js CLIツールを作成する場合は以下に従う。
 
 ### CLI用 package.json Template
 
+`bin` は strip-types で直接実行する `.ts` ファイルを指す（`.js` へのビルドは行わない）。
+
 ```json
 {
   "private": true,
   "type": "module",
   "bin": {
-    "my-cli": "./bin/cli.js"
+    "my-cli": "./bin/cli.ts"
   }
 }
 ```
 
-### CLI Entry Point Template
+### CLI Entry Point Template (`bin/cli.ts`)
 
-```javascript
+```typescript
 #!/usr/bin/env node
-// ./deploy.ts --help
 import { parseArgs } from 'node:util'
 
-const { values } = parseArgs({
+const { values, positionals } = parseArgs({
   options: {
     help: {
       type: 'boolean',
       short: 'h',
       default: false,
     }
-  }
+  },
+  allowPositionals: true,
 })
+
+function showHelp() {
+  console.log(`Usage: my-cli <command> [options]
+
+Options:
+  -h, --help  Show this help message`)
+}
 
 async function main() {
   if (values.help) {
-    await xxx()
+    showHelp()
     return
   }
+  // ここにメイン処理を実装する
 }
-main().catch(console.error)
+
+main().catch((err) => {
+  console.error(err)
+  process.exitCode = 1
+})
 ```
 
 ### CLI用 tsconfig.json Template

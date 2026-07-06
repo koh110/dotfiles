@@ -7,6 +7,7 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
 
 - 共通UIを優先して利用する
 - 共通するデザイン等は共通UIにリファクタリングする
+- 各ガイドラインのNG/OKコード例は [references/react-patterns.md](references/react-patterns.md) を参照する。禁止パターンに該当しそうな実装を書く前に必ず該当セクションを確認する
 
 ## Zod Guidelines
 
@@ -27,9 +28,11 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx files, creating or edi
 - propsはinterfaceではなくtypeで定義する
 - 既に存在する型は再定義を禁じ推論で導出する（propsに限らずコンポーネント内のすべての型に適用）
 - コンポーネント表示/非表示の制御はActivityコンポーネントを利用する
+  - `import { Activity } from 'react'`（React 19.2+）
   - `<Activity mode={condition ? 'visible' : 'hidden'}>` パターンを使用する
   - `{condition && <Component />}` のような条件付きレンダリングではなく Activity を優先する
-  - type が絞り込めないケース（例: `null` から non-null への型ナローイング）のみ Activity を利用しない
+  - 例外1: type が絞り込めないケース（例: `null` から non-null への型ナローイング）のみ Activity を利用しない
+  - 例外2: プロジェクトの react バージョンが Activity 未対応（< 19.2）の場合は条件付きレンダリングを使う（存在しない API を import して build を壊さない）
 - コンポーネントをArray.prototype.mapで描画する場合のcallback関数は必ず `{}`, `return` を用いて記述する
 - client sideでのformはreact-hook-formを利用する
 - componentのresetは対象コンポーネントのkeyを変更して行う
