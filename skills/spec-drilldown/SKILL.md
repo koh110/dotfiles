@@ -18,6 +18,19 @@ description: 'TRIGGER when: アプリケーション・新機能・CLI・API・�
 - ユーザーが「質問せずにまず作って」「使い捨てのプロトタイプでよい」と明示した場合
   - この場合も、置いた仮定を成果物と一緒に必ず列挙する
 
+### 基盤置換は原則skipしない
+
+依頼が障害復旧・依存削除・既存実装の置換として提示されていても、次のいずれかを置換・導入する場合は「明確なbugfix」としてskipしてはならない。
+
+- queue / stream / broker / event bus / job runner
+- cache lock / distributed lock / leader election
+- retry / backoff / DLQ / ack / consumer group
+- 実行境界をまたぐ連携（Node、Worker、serverless function、外部SaaS等）
+
+これらは、少なくとも配送保証、timeout時の成否不明状態、冪等性、再試行、部分失敗、永続outbox、認証境界、運用時の回復手順のいずれかを変更し得る。技術方式が未検証、またはこれらの挙動がExit Criteriaとして明文化されていないなら、仕様書と敵対的レビューが必須である。
+
+実装途中に、選んだAPIが存在しない・実行環境でbindingを直接利用できない・delivery semanticsが既存要件を満たさないことが判明した場合も、局所的な回避実装へ進んではならない。実装を停止し、技術検証・仕様書・敵対的レビューの工程へ戻る。
+
 ## Workflow
 
 1. **要求の把握**: 依頼文・既存コード・関連ドキュメントを読み、既に決まっていることを確認する。自分で調べて分かることをユーザーに質問しない
