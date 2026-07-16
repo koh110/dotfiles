@@ -12,6 +12,7 @@ glob_scan_max_depth = 8
 ":slash_tmp" = "write"
 "~/.codex" = "read"
 "~/dev" = "read"
+"~/dev/**" = "write"
 
 [permissions.workspace_network.filesystem.":workspace_roots"]
 "." = "write"
