@@ -1,99 +1,99 @@
 ---
 name: fail-closed-automation
-description: Design or review destructive, unattended, or external-tool-driven automation so uncertainty causes a safe refusal rather than mutation. Use for filesystem cleanup, Git/worktree cleanup, subprocess runners, generated artifacts, config/baseline auditors, external review gates, symlink-sensitive traversal, TOCTOU-sensitive operations, or any CLI/cron/CI task that can delete, overwrite, publish, or accept evidence.
+description: 破壊的・無人・外部ツール依存の自動化を、不確実な状態では変更せず安全に拒否するfail-closed方式で設計・レビューする。ファイルシステムcleanup、Git/worktree cleanup、subprocess runner、生成artifact、設定/baseline監査、外部review gate、symlinkを考慮した探索、TOCTOU対策、または削除・上書き・公開・evidence受理を行うCLI/cron/CIで使用する。
 ---
 
-# Fail-Closed Automation
+# Fail-Closed自動化
 
-## Core rule
+## 基本原則
 
-Define the mutation as the final step of a proof, not the default branch of the program. Missing, stale, ambiguous, unreadable, malformed, timed-out, or conflicting evidence must refuse the mutation and identify the failed predicate.
+変更をprogramの既定分岐ではなく、証明の最終段階として扱う。evidenceが欠損・古い・曖昧・読取不能・不正・timeout・競合のいずれかなら変更を拒否し、失敗したpredicateを特定する。
 
-Keep product/runtime-specific resolution in an adapter. Keep the safety core independent of one scheduler, model provider, repository host, or config schema. Each adapter must define its authoritative freshness clock, active-writer/lease contract, identity granularity, and evidence re-read point; missing domain contracts are refusal conditions, not defaults to infer.
+製品/runtime固有の解決処理はadapterに置き、安全性のcoreを特定のscheduler、model provider、repository host、config schemaから独立させる。各adapterはauthoritativeな鮮度判定clock、active writer/lease契約、identityの粒度、evidenceの再読込地点を定義する。domain contractが欠けている場合は推測せず拒否する。
 
 ## Workflow
 
-1. Enumerate assets, mutation boundaries, external evidence, and rollback limits.
-2. Write every safety predicate before implementing the mutation.
-3. Separate pure discovery/validation from side effects.
-4. Validate lexical paths and resolved filesystem identity.
-5. Re-read volatile evidence immediately before mutation.
-6. Move destructive targets to an in-boundary random quarantine when reversible staging is possible.
-7. Re-run safety predicates after quarantine and before irreversible removal.
-8. Emit a structured reason for every refusal; never silently downgrade an error to a skip.
-9. Test both the happy path and each refusal/race path.
+1. asset、変更境界、外部evidence、rollback限界を列挙する。
+2. 変更を実装する前に、すべての安全predicateを記述する。
+3. 純粋な探索・検証とside effectを分離する。
+4. lexical pathと解決後のfilesystem identityを検証する。
+5. 変更直前にvolatileなevidenceを再読込する。
+6. 可逆なstagingが可能なら、破壊対象を境界内のrandom quarantineへ移す。
+7. quarantine後かつ不可逆削除前に、安全predicateを再実行する。
+8. すべての拒否理由を構造化して出力し、errorを暗黙にskipへ格下げしない。
+9. 正常系と、各拒否・race経路の両方をtestする。
 
-For implementation patterns, read [references/safety-patterns.md](references/safety-patterns.md).
+実装patternは[references/safety-patterns.md](references/safety-patterns.md)を参照する。
 
-## Filesystem and artifact rules
+## Filesystemとartifactの規則
 
-- Validate both `path.resolve()` containment and `realpath()` containment as discovery checks; they are not mutation-time race protection.
-- For mutation, prefer descriptor-relative/no-follow operations and compare `lstat()` or opened-handle `(dev, ino)` identity at the last possible point. Refuse adversarial-filesystem use cases when the platform cannot provide the required primitive.
-- Treat `relative === '..'` and `relative.startsWith('..' + path.sep)` as escapes; do not reject harmless names such as `..cache`.
-- Detect broken symlinks, symlink cycles, unreadable files/directories, and root-external symlink exposure separately.
-- Before writing any output, reject every input/output and output/output same-path, symlink-target, or hardlink alias using canonical paths plus `(dev, ino)` when entries exist.
-- Acquire exclusive locks only in a trusted, non-adversarial directory on a filesystem with reliable atomic exclusive-create semantics; otherwise use a platform-specific atomic protocol or refuse. Record opened lock identity, release in reverse order, and unlink a lock path only when its current identity still matches; preserve and fail if missing or replaced.
-- Create outputs under per-run random temporary names using exclusive, no-follow creation. Refuse a pre-existing name, record creation/publication `(dev, ino)`, preserve pre-existing targets, and clean up only current names whose identity still matches this run.
-- Never perform failure cleanup after releasing the lock. Treat stale-lock recovery as its own atomic fail-closed protocol.
-- Use cryptographically random quarantine/temporary names and keep them on the same filesystem when relying on atomic move. Quarantine and rollback require atomic no-clobber/CAS semantics with recorded identity. A registration-aware tool that cannot provide that primitive is allowed only when source/destination parents are trusted and non-adversarial and the threat model explicitly excludes concurrent destination creation/replacement; otherwise refuse.
+- `path.resolve()`によるcontainmentと`realpath()`によるcontainmentの両方を探索時checkとして検証する。これらは変更時のrace protectionではない。
+- 変更時はdescriptor-relative/no-follow操作を優先し、可能な限り最後の時点で`lstat()`またはopen済みhandleの`(dev, ino)` identityを比較する。platformが必要なprimitiveを提供できない場合、敵対的filesystemでの利用を拒否する。
+- 親逸脱は`relative === '..'`または`relative.startsWith('..' + path.sep)`で判定する。`..cache`のような無害な名前を拒否しない。
+- broken symlink、symlink cycle、読取不能なfile/directory、root外を指すsymlink露出を個別に検出する。
+- 出力を書き込む前に、存在するentryのcanonical pathと`(dev, ino)`を使い、すべてのinput/output間およびoutput/output間のsame path、symlink target、hardlink aliasを拒否する。
+- 排他lockは、信頼できるatomic exclusive-create semanticsを持つfilesystem上のtrustedかつnon-adversarialなdirectory内でのみ取得する。それ以外はplatform固有のatomic protocolを使うか拒否する。open済みlock identityを記録し、逆順で解放し、現在のlock pathnameが同じidentityを指す場合だけunlinkする。pathが欠損・置換されていたら保持して失敗する。
+- 出力はrunごとのrandom temporary nameへexclusiveかつno-followで作成する。既存名があれば上書きせず拒否し、作成・公開時の`(dev, ino)`を記録する。既存targetを保持し、現在のnameが当該runのidentityと一致する場合だけcleanupする。
+- lock解放後に失敗cleanupを実行しない。stale lock回復は独立したatomic fail-closed protocolとして扱う。
+- quarantine/temporary nameには暗号学的random値を使い、atomic moveに依存する場合は同一filesystem上に置く。quarantineとrollbackには、記録したidentityを伴うatomic no-clobber/CAS semanticsが必要である。そのprimitiveを提供できないregistration-aware toolは、source/destinationのparentがtrustedかつnon-adversarialで、concurrentなdestination作成・置換を脅威モデルから明示的に除外できる場合だけ許可し、それ以外は拒否する。
 
-## Subprocess rules
+## Subprocessの規則
 
-- Set a finite timeout and an explicit upper bound for user-configurable timeouts.
-- Bound stdout and stderr independently or with a documented combined cap.
-- Decode evidence streams with fatal streaming UTF-8 validation and reject invalid bytes or incomplete final sequences. Non-evidence diagnostic logs may use a replacement decoder if explicitly separated.
-- Spawn a process group only on platforms where the runtime provides defined group/session semantics; use a platform-specific containment strategy elsewhere.
-- On timeout or overflow, escalate termination and guarantee the parent promise settles even if `close` never arrives. Treat missing termination confirmation as a hard failure: do not publish/remove artifacts or release isolation that a surviving child can still mutate.
-- Distinguish launch failure, timeout, output overflow, signal exit, non-zero exit, malformed output, and semantic rejection.
-- Treat startup banners, invocation arguments, and self-reported model/provider names as corroborative, untrusted evidence. An identity-sensitive gate requires authenticated observed identity from the provider/runtime response and refuses when unavailable or mismatched; a requested identity does not prove what executed.
+- 有限timeoutと、user設定可能timeoutの明示的な上限を設ける。
+- stdoutとstderrを個別に、または文書化した合計上限で制限する。
+- evidence streamはfatalなstreaming UTF-8検証でdecodeし、不正byteや不完全な終端sequenceを拒否する。evidenceではない診断logは、明示的に分離した場合のみreplacement decoderを使用できる。
+- process groupはruntime/OSが定義済みのgroup/session semanticsを提供するplatformでのみ作成し、それ以外ではplatform固有のcontainment戦略を使う。
+- timeoutまたはoutput overflow時はterminationを段階的に強化し、`close`が来なくてもparent promiseが必ずsettleするようにする。termination未確認はhard failureとして扱い、生存childが変更できるartifactの公開・削除やisolation解放を行わない。
+- launch failure、timeout、output overflow、signal exit、non-zero exit、不正output、semantic rejectionを区別する。
+- startup banner、呼出引数、self-reportされたmodel/provider名は補助的かつuntrustedなevidenceとして扱う。identity-sensitive gateではprovider/runtime responseからauthenticated observed identityを得られない、または一致しない場合に拒否する。要求したidentityは実際に実行されたidentityの証明ではない。
 
-## Baseline and verdict rules
+## Baselineとverdictの規則
 
-- Version baseline and input schemas, require the exact allowed key set at every validated object level, and reject unsupported versions or unknown/misspelled fields instead of guessing migrations.
-- Preserve sequence where order is semantically meaningful.
-- Distinguish absent fields, `null`, empty strings, empty arrays, and `false`.
-- Compare only explicitly allowlisted fields; reject new IDs, duplicate IDs, missing IDs, and unapproved field changes.
-- Refuse to write or bless a baseline while validation errors exist.
-- Validate external verdicts against a strict schema, reject duplicate JSON keys, unknown keys, non-string findings, and model identity mismatches.
-- Define an explicit, versioned acceptance policy listing every blocking finding field. Reject unknown or renamed severity fields; a gate passes only when every policy-listed blocking field is empty.
+- baselineとinput schemaをversion管理し、検証対象の各object levelでexactな許可key setを要求する。未対応versionやunknown/misspelled fieldをmigration推測で補わず拒否する。
+- 順序に意味がある場合はsequenceを保持する。
+- field欠損、`null`、空文字列、空配列、`false`を区別する。
+- 明示的にallowlistしたfieldだけを比較し、新規ID、duplicate ID、欠損ID、未承認field変更を拒否する。
+- validation errorがある状態ではbaselineの書込みや承認を拒否する。
+- 外部verdictをstrict schemaで検証し、duplicate JSON key、unknown key、string以外のfinding、model identity mismatchを拒否する。
+- blocking finding fieldをすべて列挙した明示的かつversion付きのacceptance policyを定義する。unknown/renamed severity fieldを拒否し、policyに列挙されたすべてのblocking fieldが空の場合だけgateを通す。
 
-## TOCTOU and external evidence
+## TOCTOUと外部evidence
 
-- Record the first observation, then re-query the authoritative source immediately before mutation.
-- Compare identity and value: path identity, object ID, ref name, commit/OID, generation/version, or equivalent.
-- If the source changed, refuse and restart discovery rather than continuing from mixed snapshots.
-- Do not accept indirect evidence when an exact identifier is available.
-- State the threat model explicitly. Quarantine blocks ordinary path-based writers but not an adversarial same-user process retaining an old cwd/dirfd.
+- 初回観測を記録し、変更直前にauthoritative sourceを再照会する。
+- path identity、object ID、ref名、commit/OID、generation/versionなど、identityと値の両方を比較する。
+- sourceが変化していたらmixed snapshotのまま続行せず、拒否して探索をやり直す。
+- exact identifierが利用できる場合は間接evidenceを受理しない。
+- 脅威モデルを明示する。quarantineは通常のpath-based writerを遮断するが、古いcwd/dirfdを保持する敵対的same-user processは遮断できない。
 
-## Verification matrix
+## 検証matrix
 
-At minimum cover:
+最低限、以下を対象にする。
 
-- valid operation
+- 正常operation
 - dirty/untracked/ignored/unreadable input
-- missing and malformed evidence
-- symlink escape, hardlink alias, and symlink cycle
-- stale snapshot / value changed between checks
-- timeout, output overflow, invalid UTF-8, and incomplete final UTF-8 sequence
-- launch failure, non-zero exit, signal exit, and descendant that survives parent exit
-- concurrent run contending for the same artifacts
-- pre-existing output preservation; lock-path replacement/loss; stale-lock takeover refusal
-- per-run temporary/publication collision, quarantine-name collision, rollback-destination race, and cleanup identity mismatch
-- rollback success and rollback refusal
-- worktree removed after validation while the branch is concurrently checked out elsewhere
-- unsupported baseline schema and unapproved field drift
-- malformed/duplicated verdict JSON, nested unknown keys, non-string findings, and identity mismatch
+- 欠損・不正evidence
+- symlink escape、hardlink alias、symlink cycle
+- stale snapshot、check間での値変更
+- timeout、output overflow、不正UTF-8、不完全な終端UTF-8 sequence
+- launch failure、non-zero exit、signal exit、parent exit後も生存するdescendant
+- 同じartifactを取り合うconcurrent run
+- 既存output保持、lock pathの置換・消失、stale lock takeover拒否
+- runごとのtemporary/publication衝突、quarantine名衝突、rollback destination race、cleanup identity mismatch
+- rollback成功とrollback拒否
+- validation後にworktreeを削除しつつ別processが同じbranchをcheckoutするrace
+- 未対応baseline schemaと未承認field drift
+- 不正・duplicate verdict JSON、nested unknown key、string以外のfinding、identity mismatch
 
-Run the real executable or fixture. A code review without execution is not sufficient evidence.
+実際のexecutableまたはfixtureを実行する。実行を伴わないcode reviewだけでは十分なevidenceにならない。
 
-## Reporting
+## 報告
 
-Report:
+以下を報告する。
 
-- exact commands executed
-- mutation count and refusal/error counts
-- each safety refusal reason
-- artifacts or transcripts used as evidence
-- accepted residual risks
+- 実行した正確なcommand
+- 変更件数と拒否/error件数
+- 各安全拒否の理由
+- evidenceとして使ったartifactまたはtranscript
+- 受容した残余risk
 
-Do not report “nothing changed” as success when discovery itself failed.
+探索自体が失敗した場合に「変更なし」を成功として報告しない。

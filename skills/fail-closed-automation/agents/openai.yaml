@@ -1,4 +1,4 @@
 interface:
-  display_name: "Fail-Closed Automation"
+  display_name: "Fail-Closed自動化"
   short_description: "破壊的・外部依存の自動化をfail-closedで設計・検証する"
-  default_prompt: "Use $fail-closed-automation to design or review automation involving destructive operations, subprocesses, artifacts, or baselines so uncertainty fails closed."
+  default_prompt: "$fail-closed-automation を使い、破壊的operation、subprocess、artifact、baselineを扱う自動化を、不確実な状態では変更せず拒否するよう設計またはレビューしてください。"
