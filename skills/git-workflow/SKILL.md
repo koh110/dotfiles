@@ -77,6 +77,7 @@ git status --short
 - `.worktree/` 配下へ専用 worktree を作り、移動してから編集を始める
 
 ```bash
+set -euo pipefail
 git worktree list
 git status --short
 remote_meta=$(git ls-remote --symref origin HEAD)
@@ -104,6 +105,7 @@ git branch --show-current
 - root checkoutはfeature完了まで作業場所として使わない
 
 ```bash
+set -euo pipefail
 # 上の手順でremote_oidを確定済みのroot checkoutから
 umask 077
 patch_file=$(mktemp)

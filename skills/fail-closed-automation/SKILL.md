@@ -9,7 +9,7 @@ description: Design or review destructive, unattended, or external-tool-driven a
 
 Define the mutation as the final step of a proof, not the default branch of the program. Missing, stale, ambiguous, unreadable, malformed, timed-out, or conflicting evidence must refuse the mutation and identify the failed predicate.
 
-Keep product/runtime-specific resolution in an adapter. Keep the safety core independent of one scheduler, model provider, repository host, or config schema.
+Keep product/runtime-specific resolution in an adapter. Keep the safety core independent of one scheduler, model provider, repository host, or config schema. Each adapter must define its authoritative freshness clock, active-writer/lease contract, identity granularity, and evidence re-read point; missing domain contracts are refusal conditions, not defaults to infer.
 
 ## Workflow
 
@@ -35,7 +35,7 @@ For implementation patterns, read [references/safety-patterns.md](references/saf
 - Acquire exclusive locks only in a trusted, non-adversarial directory on a filesystem with reliable atomic exclusive-create semantics; otherwise use a platform-specific atomic protocol or refuse. Record opened lock identity, release in reverse order, and unlink a lock path only when its current identity still matches; preserve and fail if missing or replaced.
 - Create outputs under per-run random temporary names using exclusive, no-follow creation. Refuse a pre-existing name, record creation/publication `(dev, ino)`, preserve pre-existing targets, and clean up only current names whose identity still matches this run.
 - Never perform failure cleanup after releasing the lock. Treat stale-lock recovery as its own atomic fail-closed protocol.
-- Use cryptographically random quarantine/temporary names and keep them on the same filesystem when relying on atomic rename.
+- Use cryptographically random quarantine/temporary names and keep them on the same filesystem when relying on atomic move. Quarantine and rollback require atomic no-clobber/CAS semantics with recorded identity. A registration-aware tool that cannot provide that primitive is allowed only when source/destination parents are trusted and non-adversarial and the threat model explicitly excludes concurrent destination creation/replacement; otherwise refuse.
 
 ## Subprocess rules
 
@@ -78,7 +78,7 @@ At minimum cover:
 - launch failure, non-zero exit, signal exit, and descendant that survives parent exit
 - concurrent run contending for the same artifacts
 - pre-existing output preservation; lock-path replacement/loss; stale-lock takeover refusal
-- per-run temporary/publication collision and cleanup identity mismatch
+- per-run temporary/publication collision, quarantine-name collision, rollback-destination race, and cleanup identity mismatch
 - rollback success and rollback refusal
 - worktree removed after validation while the branch is concurrently checked out elsewhere
 - unsupported baseline schema and unapproved field drift

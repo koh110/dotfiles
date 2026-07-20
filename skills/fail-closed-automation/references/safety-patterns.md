@@ -78,21 +78,24 @@ DISCOVER
   -> REMOVE quarantine
 ```
 
-For Git worktrees, use `git worktree move <candidate> <random-quarantine>` so Git's administrative path remains synchronized; do not use raw filesystem `rename()`. Refuse cleanup when `git worktree move` is unsupported or fails (including unsupported submodule cases). For ordinary directories, use an atomic same-filesystem rename when available.
+For Git worktrees, use `git worktree move <candidate> <random-quarantine>` so Git's administrative path remains synchronized; do not use raw filesystem `rename()`. Git does not promise an atomic no-clobber/CAS destination claim, so this operation is permitted only when both source and destination parents are trusted, non-adversarial, and the stated threat model explicitly excludes concurrent destination creation/replacement; otherwise refuse because the ordinary Git CLI cannot provide the required primitive. Refuse cleanup when `git worktree move` is unsupported or fails (including unsupported submodule cases). After quarantine validation, `git worktree remove <random-quarantine>` is the combined irreversible registration-and-filesystem mutation: collapse the generic registration/remove stages into that one Git operation, then verify both registration and path absence. Never edit Git administrative worktree registration directly or unregister first and follow with raw filesystem deletion. For ordinary directories, require an atomic same-filesystem no-clobber move/CAS primitive and record the moved identity; refuse when unavailable.
 
-If a post-quarantine check fails, restore through the same registration-aware operation only when the original path is free and identity still matches. Otherwise preserve quarantine and emit a manual-recovery path.
+If a post-quarantine check fails, restore through the same registration-aware or atomic no-clobber/CAS operation only when the original path is free and the recorded identity still matches. For Git, rollback via `git worktree move` has the same trusted-parent and excluded-destination-race precondition; refuse and preserve quarantine when that precondition is absent. A prior free-path check is not sufficient because it races; preserve quarantine and emit a manual-recovery path when neither atomic destination protection nor the explicitly documented trusted-parent registration-aware exception applies, or when the selected operation fails.
 
 ## 6. Git worktree cleanup predicates
 
 Before cleanup require all of the following:
 
 - candidate is a registered, unlocked linked worktree under the allowlisted root
+- the adapter acquires enforceable exclusive cleanup authority or a fencing lease that prevents participating writers from starting/continuing mutations, and holds it across quarantine, removal or rollback, postcondition verification, and final release; Git's worktree `locked` state alone is insufficient
 - candidate is not the main/default-branch worktree
 - tracked, untracked, and ignored-file checks are all empty
 - candidate `HEAD`, local branch ref, and expected branch identity agree
 - default branch is explicit or obtained from authoritative remote metadata; never guess `main`/`master`
 - remote default name and OID are re-queried just before mutation
 - merge evidence is exact and current
+
+Immediately before `git worktree move` and again immediately before `git worktree remove`, re-fetch/re-query authoritative remote metadata, verify that the same exclusive cleanup authority/fencing lease is still held, and re-check worktree registration, lock state, status, ignored files, `HEAD`, branch identity, and merge evidence. Hold the authority through removal or rollback and postcondition verification, releasing it only after no surviving writer can mutate the target. Refuse unattended cleanup when the adapter cannot enforce this writer contract. A non-participating adversarial same-user process retaining an old cwd/dirfd remains outside the trusted-writer threat model and must be called out explicitly. Any mismatch is a refusal or rollback trigger.
 
 For an ordinary merge, require candidate `HEAD` to be an ancestor of the re-queried authoritative remote-default OID. For squash/rebase merge evidence, require candidate `HEAD` to equal the merged PR's exact head OID and require the merge commit/result to be reachable from that same re-queried default OID. Unattended cleanup must preserve the local branch because branch checkout occupancy and ref deletion cannot be atomically coordinated with ordinary Git CLI operations. Report the preserved branch for explicit follow-up; never use branch-name-only forced deletion in automation.
 
