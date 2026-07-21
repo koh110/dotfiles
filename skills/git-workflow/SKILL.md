@@ -72,15 +72,23 @@ git status --short
 - この手順は `git_dir == common_dir` の root checkout にいる場合だけ実行する
 - コード変更を伴う作業では、`git worktree list` と `git status --short` を確認してから worktree を作る
 - repository root に `.worktree/` がなければ作る
-- worktreeはremoteの最新 `main` ブランチから開始する
-- `.worktree/` 配下へ専用 worktree を作る
-- 新しい worktree に移動してから編集を始める
+- `git ls-remote --symref origin HEAD`でauthoritative remote default branch名とOIDを取得し、形式不正・欠損時はguessせず停止する
+- 取得したexact refをfetchし、`FETCH_HEAD`が照会済みOIDと一致することを検証してstart pointにする
+- `.worktree/` 配下へ専用 worktree を作り、移動してから編集を始める
 
 ```bash
+set -euo pipefail
 git worktree list
 git status --short
+remote_meta=$(git ls-remote --symref origin HEAD)
+default_full_ref=$(printf '%s\n' "$remote_meta" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
+remote_oid=$(printf '%s\n' "$remote_meta" | awk '$2 == "HEAD" { print $1 }')
+case "$default_full_ref" in refs/heads/*) ;; *) exit 1 ;; esac
+test -n "$remote_oid"
+git fetch --no-tags origin "$default_full_ref"
+test "$(git rev-parse FETCH_HEAD)" = "$remote_oid"
 mkdir -p .worktree
-git worktree add .worktree/feature-short-name -b feature/short-name
+git worktree add .worktree/feature-short-name -b feature/short-name "$remote_oid"
 cd .worktree/feature-short-name
 git rev-parse --show-toplevel
 git branch --show-current
@@ -89,23 +97,30 @@ git branch --show-current
 ## Root Checkout Recovery Guidelines
 
 - root checkout での追加編集を止める
-- 正しい branch / worktree を作る
-- 変更を新しい worktree に移す
-- root checkout 側の重複変更を除去する
-- root checkout は feature 完了まで作業場所として使わない
-
-移植手順（stash は worktree 間で共有されるためこの順で安全に移せる）:
+- 上記のauthoritative remote HEAD解決手順で正しいbranch/worktreeを作る
+- shared stash stackは全worktree/processで共有されるため、無条件の`git stash pop`による移植は禁止する
+- tracked変更は権限を制限した一時patchへ書き、target側で`git apply --check`後に適用する
+- untracked fileはNUL区切り一覧を確認し、targetに既存pathがないものだけ明示的に移す
+- targetで差分を検証するまでroot checkout側の変更を削除しない。移植後もroot側cleanupは別の明示的手順として行う
+- root checkoutはfeature完了まで作業場所として使わない
 
 ```bash
-# root checkout で（untracked も含めて退避）
-git stash push --include-untracked -m 'move to worktree'
-git worktree add .worktree/feature-short-name -b feature/short-name
-cd .worktree/feature-short-name
-git stash pop
-# pop が成功したことと root checkout が clean になったことを両方確認する
-git status --short
-git -C ../.. status --short
+set -euo pipefail
+# 上の手順でremote_oidを確定済みのroot checkoutから
+umask 077
+patch_file=$(mktemp)
+untracked_file=$(mktemp)
+git diff --binary HEAD > "$patch_file"
+git ls-files -z --others --exclude-standard > "$untracked_file"
+git worktree add .worktree/feature-short-name -b feature/short-name "$remote_oid"
+git -C .worktree/feature-short-name apply --check "$patch_file"
+git -C .worktree/feature-short-name apply "$patch_file"
+# untracked_fileをNUL対応toolでレビューし、衝突しないfileだけ個別にcopyする
+git -C .worktree/feature-short-name status --short
+git status --short  # まだ原本を保持していることを確認
 ```
+
+一時fileはtargetとrootの検証完了後に削除する。自動移植が必要なら`fail-closed-automation`を適用し、artifact ownershipとconcurrent writerを別途扱う。
 
 ## Commit / Rebase / Push Guidelines
 
@@ -115,22 +130,28 @@ git -C ../.. status --short
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
 - push 前に意図しない file が含まれていないか再確認する
-- conflict の解消は `git pull --rebase origin main` を利用し、`git rebase --continue` を繰り返し conflict が全て解消するまで行う
+- conflict 解消前にも`git ls-remote --symref origin HEAD`でauthoritative default branch名/OIDを再取得し、exact refをfetchしてOID一致を検証する。`main`/`master`へguessせず、その照会済みOIDへrebaseする
 
 ## Cleanup Guidelines
 
 - cleanup は root checkout と worktree のどちらに対して行うか明確にしてから実行する
 - `.worktree/` 自体を誤って消さない
-- `git clean` は対象に untracked で残したい file がないか確認してから実行する
+- `git clean`はquarantine・identity再検証・rollbackがないためcleanup手段として使わない
 - root checkout の status に `.worktree/` が出る場合は、repository の local exclude で隠すことを優先する
   - `.gitignore` を変更せずに隠すには root checkout で `echo '.worktree/' >> .git/info/exclude`
-- merge 済みの worktree を片付ける場合は、worktree 内に未 commit / 未 push の変更がないことを確認してから以下を実行する
+- 手動cleanupでもtrackedだけでなくuntracked・ignored fileを個別に検査し、1つでもあれば削除しない
+- 手動・自動を問わず破壊的cleanupでは`fail-closed-automation` skillを併用し、そのGit worktree cleanup predicatesをauthoritativeな安全要件として適用する
+- 最低限、tracked・untracked・ignoredが空であること、authoritative remote default名/OIDとexact merge evidenceが削除直前にも一致すること、quarantineをraw renameではなく`git worktree move`で行えることを要求する
+- worktree登録を削除して登録消滅を確認後も、無人cleanupではlocal branchを保持して明示的なfollow-up対象として報告する。通常のGit CLIでは別worktreeへのconcurrent checkoutとref削除をatomicに調整できないため、自動branch削除は行わない。remote branchも明示依頼なしに削除しない
+- 手動cleanupでも以下のread-only検査だけを根拠に削除してはいけない。検査後に上記のauthoritative remote/OID、merge evidence、`git worktree move` quarantine、削除直前再検証をすべて実施する
 
 ```bash
-git -C .worktree/feature-short-name status --short   # 空であることを確認
-git worktree remove .worktree/feature-short-name
-git branch -d feature/short-name                     # 未mergeなら失敗する(-D で強制しない)
+git -C .worktree/feature-short-name status --short
+git -C .worktree/feature-short-name ls-files --others --exclude-standard
+git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standard
 ```
+
+`git worktree remove`や`git branch -d`をこのsnapshotだけに続けるshortcutは禁止する。無人cleanupはlocal branchを保持し、手動cleanupでも削除直前に全predicateと別worktreeで未使用であることを再検証する。
 
 ## Common Pitfalls
 

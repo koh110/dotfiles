@@ -114,6 +114,7 @@ Node.js CLIツールを作成する場合は以下に従う。
 - 引数解析は `node:util` から `parseArgs` をインポートして利用し、手書きパーサは避ける
   - `commander` などの利用は禁じる
 - TypeScriptで記述し、Node.jsのstrip-typesで実行する
+- subprocess、artifact出力、baseline比較、filesystem cleanup、外部review gateのいずれかを扱う場合は`fail-closed-automation` skillもloadし、そのsubprocess・artifact ownership・TOCTOU規則を適用する
 
 ### CLI用 package.json Template
 
