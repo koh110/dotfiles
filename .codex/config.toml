@@ -4,15 +4,25 @@ approvals_reviewer = "auto_review"
 model_reasoning_effort = "medium"
 web_search = "live"
 model = "gpt-5.6-terra"
+service_tier = "default"
 
 [permissions.workspace_network.filesystem]
 glob_scan_max_depth = 8
 ":minimal" = "read"
 ":tmpdir" = "write"
 ":slash_tmp" = "write"
+"~/.zshenv" = "read"
 "~/.codex" = "read"
 "~/dev" = "read"
 "~/dev/**" = "write"
+"~/.local" = "read"
+"~/.claude" = "write"
+"~/.claude.json" = "write"
+"~/.gitconfig" = "read"
+"~/.config/git" = "read"
+"/bin/sh" = "read"
+"/usr/local/bin" = "read"
+"/Library/Developer/CommandLineTools" = "read"
 
 [permissions.workspace_network.filesystem.":workspace_roots"]
 "." = "write"
