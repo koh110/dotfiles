@@ -19,6 +19,7 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 - 関数定義はarrow functionよりnormal functionを優先する
   - filter, map, reduceなどのcallback関数はarrow functionを利用する
 - arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
+- 参照数が1つならば不必要に変数化を行わない
 
 上記スタイルをすべて満たす例:
 
@@ -86,7 +87,6 @@ RUN npm install --min-release-age=7
   - 同一ファイル内で固有のprefixを共有することを禁じる。テスト毎に `task.id` などのtestごとに unique となる値を prefix として利用し、seed を分離する
   - `beforeAll` で共通の seed データを作成することを禁じる。`beforeAll` は接続と必要最小限の truncate のみに留め、seed は各テスト内で `task.id` prefix を付けて作成する
   - 共有リソース全体に依存する assertion (例: `count`, `length`) を禁じる。`find()` 等で自テストが作成したレコードのみを対象に assertion する
-  - pagination 等のため大量データ (例: PAGE_SIZE 超え) を投入することを禁じる。境界値テストは別途専用環境が必要なら省略するか、件数に依存しない代替検証 (skip が効くか) で代用する
 - サンプルとNGパターンは [references/tests.md](references/tests.md) を参照
 
 ## TypeScript Guidelines

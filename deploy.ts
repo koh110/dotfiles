@@ -84,6 +84,15 @@ async function deploySkills(name: string, targetDirName: string) {
   })
 }
 
+async function deployCodexAgents() {
+  console.log('copy: codex agents')
+  const targetDir = join(homedir(), '.codex', 'agents')
+  await mkdir(targetDir, { recursive: true })
+  await cp(join(import.meta.dirname, '.codex', 'agents'), targetDir, {
+    recursive: true
+  })
+}
+
 async function copilot() {
   await deploySkills('copilot', '.copilot')
 }
@@ -95,6 +104,7 @@ async function claude() {
 async function codex() {
   await Promise.all([
     deploySkills('codex', '.codex'),
+    deployCodexAgents(),
     deployCodexConfig(
       join(import.meta.dirname, '.codex/config.toml'),
       join(homedir(), '.codex/config.toml')
