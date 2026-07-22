@@ -1,21 +1,21 @@
 approval_policy = "on-request"
-default_permissions = "workspace_network"
+default_permissions = "dev"
 approvals_reviewer = "auto_review"
 model_reasoning_effort = "medium"
 web_search = "live"
 model = "gpt-5.6-terra"
 service_tier = "default"
 
-[permissions.workspace_network]
+[permissions.dev]
 extends = ":workspace"
 
-[permissions.workspace_network.filesystem]
+[permissions.dev.filesystem]
 "/opt/homebrew/bin/gh" = "read"
 
-[permissions.workspace_network.filesystem.":workspace_roots"]
+[permissions.dev.filesystem.":workspace_roots"]
 ".env" = "deny"
 "**/.env" = "deny"
 
-[permissions.workspace_network.network]
+[permissions.dev.network]
 enabled = true
 mode = "full"
