@@ -54,6 +54,18 @@ description: 'TRIGGER when: アプリケーション・新機能・CLI・API・�
 
 仕様書の作成者は、作成時に置いた思い込みを自己レビューでも見逃しやすい。ユーザー承認の前に、仕様書を独立したレビュアーへ渡し、追加質問なしでは実装できない曖昧さ・矛盾・欠落を敵対的に探させる。
 
+この節を、レビューの入力・判定schema・合格条件を定義する**クロスエージェントの正本**とする。Hermes、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、このskillを置き換える正本にせず、ここで定義した契約を実行するadapterとして扱う。
+
+ランタイム固有adapterを使う場合も、次を満たさなければ有効なレビュー証跡にしない:
+
+- Review Inputsだけを独立コンテキストへ渡す
+- 実際に使用されたモデル名・能力tierを記録する
+- Blocking / Major / Minor / Invalid のschemaを保持する
+- processのexit code 0だけを合格根拠にせず、構造化されたVerdictを検証する
+- transcriptまたは同等のレビュー記録を保存し、対象revisionと結び付ける
+
+adapterが出力0 bytes、Verdict欠落、rate limit、timeout、model不一致を返した場合はfail-closedとし、`Pending: qualified reviewer unavailable`または再実行対象にする。Hermes固有toolが利用できる環境でも、そのtool側にレビュー契約を複製せず、このskillの契約へ従わせる。
+
 ### Reviewer Selection
 
 レビュアーは、**仕様作成モデルより仕様理解・設計推論・欠落検出の能力が高いモデル**を優先する。上位モデルを利用できない場合は、仕様作成モデルと同等の能力を持つモデルを独立したコンテキストで使ってよい。同等モデルへのフォールバックでは、仕様作成時の会話・推論・中間メモを引き継がず、Review Inputs だけを与える。
