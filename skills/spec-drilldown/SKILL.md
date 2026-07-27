@@ -54,7 +54,7 @@ description: 'TRIGGER when: アプリケーション・新機能・CLI・API・�
 
 仕様書の作成者は、作成時に置いた思い込みを自己レビューでも見逃しやすい。ユーザー承認の前に、仕様書を独立したレビュアーへ渡し、追加質問なしでは実装できない曖昧さ・矛盾・欠落を敵対的に探させる。
 
-この節を、レビューの入力・判定schema・合格条件を定義する**クロスエージェントの正本**とする。Hermes、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、このskillを置き換える正本にせず、ここで定義した契約を実行するadapterとして扱う。
+この節を、レビューの入力・判定schema・合格条件を定義する**クロスエージェントの正本**とする。Hermes、Claude Code、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、このskillを置き換える正本にせず、ここで定義した契約を実行するadapterとして扱う。
 
 ランタイム固有adapterを使う場合も、次を満たさなければ有効なレビュー証跡にしない:
 
@@ -64,7 +64,16 @@ description: 'TRIGGER when: アプリケーション・新機能・CLI・API・�
 - processのexit code 0だけを合格根拠にせず、構造化されたVerdictを検証する
 - transcriptまたは同等のレビュー記録を保存し、対象revisionと結び付ける
 
-adapterが出力0 bytes、Verdict欠落、rate limit、timeout、model不一致を返した場合はfail-closedとし、`Pending: qualified reviewer unavailable`または再実行対象にする。Hermes固有toolが利用できる環境でも、そのtool側にレビュー契約を複製せず、このskillの契約へ従わせる。
+adapterが出力0 bytes、Verdict欠落、rate limit、timeout、model不一致を返した場合はfail-closedとし、`Pending: qualified reviewer unavailable`または再実行対象にする。固有toolが利用できる環境でも、そのtool側にレビュー契約を複製せず、このskillの契約へ従わせる。
+
+レビュー実行と再レビューでは、次のクロスエージェント運用を守る:
+
+- identity-sensitiveなgateは毎回freshな独立process/sessionで実行する。resumeしたsessionは現在のdefault modelへ切り替わる可能性があるため、実モデルidentityを再証明できない限り合格証跡に使わない
+- repository側のcanonical test / lint / buildはorchestratorが実行し、観測したcommandと結果をReview Inputsへ含める。reviewerには原則read-onlyな静的レビューを依頼し、同じ重い検証を無制限に再実行させない
+- Blocking / Majorを修正した後は、元の指摘ID、対象file/section、対象revisionを明記したfreshなclosure reviewを行い、各指摘の解消と新規Blocking / Majorの有無を確認する
+- 初回とclosure reviewのprompt、transcript、Verdictを上書きせず別artifactとして保存する。途中reasoningやpartial outputだけから合格を推定しない
+
+これらは特定CLIの呼び出し方ではなくレビュー証跡の契約である。各runtime adapterは、この契約を満たすfresh session、read-only実行、artifact保存、identity/Verdict検証へ変換する。
 
 ### Reviewer Selection
 
