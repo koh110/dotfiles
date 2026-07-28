@@ -26,6 +26,7 @@ git status --short
 git worktree list
 ```
 
+- sessionが `.worktree/<name>/` 以下から起動されている場合も、repository root ではなく起動中の linked worktree を作業場所として扱う。`git_dir != common_dir` であることを確認できたら、共有 `.git` への書き込みを要する `git worktree add` は実行しない
 - `git_dir != common_dir`: linked worktree 内にいる。agent、IDE、automation、または手動の Git 操作で作成された worktree を含む。作成元にかかわらず現在の worktree を専用作業場所として再利用し、新しい worktree を作成しない
 - `git_dir == common_dir`: root checkout にいる。コード変更なら `.worktree/` 配下に専用 worktree を作成して移動する
 - 判定結果と実際の `git worktree list` が矛盾する場合は編集を始めず、path 解決と Git 状態を再確認する
@@ -170,6 +171,7 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 
 - この skill が load されたら、git 操作を始める前に repository root / Git dir / common Git dir / branch / worktree / working tree 状態を必ず確認すること
 - `git_dir != common_dir` なら現在の linked worktree を再利用し、新しい worktree を作成しないこと
+- `.worktree/` 以下で起動した場合、既存の linked worktree を再利用し、共有 `.git` へ書き込む `git worktree add` を試行しないこと
 - `git_dir == common_dir` でコード変更を行うなら、root checkout ではなく `.worktree/` 配下の専用 worktree を作成して移動すること
 - detached HEAD のまま commit / rebase / push しないこと
 - コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
