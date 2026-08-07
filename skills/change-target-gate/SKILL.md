@@ -19,6 +19,24 @@ description: 'TRIGGER when: 複数repositoryへの変更展開、skill・設定�
   --manifest path/to/change-target-manifest.json
 ```
 
+## PR target/base branchと作業branch
+
+PRのtarget/base branchを先に確定し、作業branchは必ずそのtarget branchの最新確認済みOIDから作成します。作業branchの起点を`main`へ固定しません。
+
+- PR targetが明示されている場合は、`main`・`master`・`release/1.x`など既存remote branchの指定をそのまま使う
+- PR targetが未指定の場合だけ、`git ls-remote --symref origin HEAD`でremote default branchを解決する
+- `main`や`master`を名前だけで推測しない。target branchの存在、fetch後のexact OID、PR metadataのbaseを検証する
+- `verify`の`--base`には、作業開始時に確定したtarget（例: `origin/main`、`origin/master`、`origin/release/1.x`）を渡す
+- target branchが存在しない、fetchしたOIDが一致しない、PRのbaseと作業時のtargetが異なる場合は停止する
+
+```bash
+PR_TARGET_BRANCH=release/1.x ./bin/change-target-gate verify \
+  --repo . \
+  --policy config/change-target-policy.json \
+  --manifest path/to/change-target-manifest.json \
+  --base origin/release/1.x
+```
+
 ## 必須手順
 
 1. 変更を始める前に、target repository、owner、base branch、target path、operation（`patch`または`create`）をmanifestへ書く。

@@ -73,23 +73,32 @@ git status --short
 - この手順は `git_dir == common_dir` の root checkout にいる場合だけ実行する
 - コード変更を伴う作業では、`git worktree list` と `git status --short` を確認してから worktree を作る
 - repository root に `.worktree/` がなければ作る
-- `git ls-remote --symref origin HEAD`でauthoritative remote default branch名とOIDを取得し、形式不正・欠損時はguessせず停止する
-- 取得したexact refをfetchし、`FETCH_HEAD`が照会済みOIDと一致することを検証してstart pointにする
+- PRを作成する場合は、先にPRのtarget/base branchを確定する。明示された既存branchを優先し、未指定ならremoteのdefault branchをauthoritative metadataから解決する（通常は`main`、存在しなければ`master`等。名前を推測しない）
+- 確定したtarget branchがremoteに存在することを確認し、そのexact refとOIDをfetchしてstart pointにする。作業branchを`main`へ固定したり、targetと異なるbranchから切ったりしない
 - `.worktree/` 配下へ専用 worktree を作り、移動してから編集を始める
 
 ```bash
 set -euo pipefail
 git worktree list
 git status --short
-remote_meta=$(git ls-remote --symref origin HEAD)
-default_full_ref=$(printf '%s\n' "$remote_meta" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
-remote_oid=$(printf '%s\n' "$remote_meta" | awk '$2 == "HEAD" { print $1 }')
-case "$default_full_ref" in refs/heads/*) ;; *) exit 1 ;; esac
-test -n "$remote_oid"
-git fetch --no-tags origin "$default_full_ref"
-test "$(git rev-parse FETCH_HEAD)" = "$remote_oid"
+# PRのtarget/baseが明示されている場合はそれを設定する。
+# 未指定の場合だけremote defaultを解決する。
+target_branch="${PR_TARGET_BRANCH:-}"
+if test -z "$target_branch"; then
+  remote_meta=$(git ls-remote --symref origin HEAD)
+  target_full_ref=$(printf '%s\n' "$remote_meta" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
+else
+  target_full_ref="refs/heads/$target_branch"
+fi
+case "$target_full_ref" in refs/heads/*) ;; *) exit 1 ;; esac
+target_branch=${target_full_ref#refs/heads/}
+target_oid=$(git ls-remote origin "$target_full_ref" | awk 'NR == 1 { print $1 }')
+test -n "$target_oid"
+git fetch --no-tags origin "$target_full_ref"
+test "$(git rev-parse FETCH_HEAD)" = "$target_oid"
+printf 'PR target: %s (%s)\n' "$target_branch" "$target_oid"
 mkdir -p .worktree
-git worktree add .worktree/feature-short-name -b feature/short-name "$remote_oid"
+git worktree add .worktree/feature-short-name -b feature/short-name "$target_oid"
 cd .worktree/feature-short-name
 git rev-parse --show-toplevel
 git branch --show-current
@@ -107,13 +116,13 @@ git branch --show-current
 
 ```bash
 set -euo pipefail
-# 上の手順でremote_oidを確定済みのroot checkoutから
+# 上の手順でtarget_oidを確定済みのroot checkoutから
 umask 077
 patch_file=$(mktemp)
 untracked_file=$(mktemp)
 git diff --binary HEAD > "$patch_file"
 git ls-files -z --others --exclude-standard > "$untracked_file"
-git worktree add .worktree/feature-short-name -b feature/short-name "$remote_oid"
+git worktree add .worktree/feature-short-name -b feature/short-name "$target_oid"
 git -C .worktree/feature-short-name apply --check "$patch_file"
 git -C .worktree/feature-short-name apply "$patch_file"
 # untracked_fileをNUL対応toolでレビューし、衝突しないfileだけ個別にcopyする
@@ -125,17 +134,18 @@ git status --short  # まだ原本を保持していることを確認
 
 ## Minimum-Diff and Scope Gate
 
-明示的な指定がない限り、作業は最新の remote `main` を起点にし、依頼の目的達成に必要な最小差分だけを含める。
+明示的なPR target/base branchがある場合はそれを起点にし、ない場合だけauthoritative remote metadataからdefault branchを解決する。通常は`main`、存在しなければ`master`等だが、branch名を推測しない。
 
 作業開始前に、以下を確認する。
 
-- 目的、受け入れ条件、変更対象を列挙する
-- 現在の branch、worktree、`origin/main`との差分を確認する
+- 目的、受け入れ条件、変更対象、PR target/base branchを列挙する
+- 現在のbranch、worktree、確定したtarget branchとの差分を確認する
+- target branchがremoteに存在し、取得したOIDと一致することを確認する
 - 各変更が目的達成に必要かを確認する
 - 未マージbranch、作業途中worktree、関連機能の実装を暗黙の土台にしない
 - 関連機能を含める場合は、import、route、schema、runtime call、再現可能な失敗ログなどの具体的な依存を確認する
 
-実装後は `origin/main` との差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
+実装後は、作業開始時に確定したPR target/base branchとの差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
 
 ## Portable Change-Target Gate
 
@@ -149,8 +159,10 @@ node tools/change-target-gate.mjs discover --repo . --query "git workflow"
 node tools/change-target-gate.mjs verify \
   --policy config/change-target-policy.json \
   --manifest /path/to/change-target-manifest.json \
-  --base origin/main
+  --base <resolved-pr-target>
 ```
+
+`--base`には作業開始時に確定したPR target/base branch（例: `origin/main`、`origin/master`、`origin/release/1.x`）を渡す。`main`を固定値として渡したり、targetと異なるbranchを暗黙に使用したりしない。
 
 - `patch`対象がbase refに存在しない場合、`create`対象が既に存在する場合は停止する
 - originのrepository、manifestのrepository、target repositoryが一致しない場合は停止する
@@ -167,7 +179,7 @@ node tools/change-target-gate.mjs verify \
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
 - push 前に意図しない file が含まれていないか再確認する
-- conflict 解消前にも`git ls-remote --symref origin HEAD`でauthoritative default branch名/OIDを再取得し、exact refをfetchしてOID一致を検証する。`main`/`master`へguessせず、その照会済みOIDへrebaseする
+- conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
 
 ## Cleanup Guidelines
 

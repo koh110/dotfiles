@@ -69,6 +69,25 @@ test('既存artifactへのpatchと宣言済み差分を受け入れる', () => {
   })
 })
 
+test('明示された既存target branchをbaseに使う', () => {
+  git('branch', 'release/1.x')
+  writeFileSync(join(repo, 'skills.md'), 'git workflow\nrelease change\n')
+  git('add', '.')
+  git('commit', '-m', 'target branch patch')
+  const policy = join(metadata, 'policy.json')
+  const manifestPath = join(metadata, 'manifest.json')
+  writeFileSync(policy, JSON.stringify({ version: 1, repository: 'koh110/dotfiles', defaultBranch: 'main', allowedRepositories: ['koh110/dotfiles'] }))
+  writeFileSync(manifestPath, JSON.stringify(manifest([target('skills.md', 'patch')])))
+
+  assert.deepEqual(verify(repo, policy, manifestPath, 'release/1.x'), {
+    ok: true,
+    repository: 'koh110/dotfiles',
+    base: 'release/1.x',
+    changed: ['skills.md'],
+    errors: [],
+  })
+})
+
 test('既存artifactをcreate扱いした場合は拒否する', () => {
   writeFileSync(join(repo, 'skills.md'), 'changed\n')
   git('add', '.')
