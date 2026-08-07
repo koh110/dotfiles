@@ -157,7 +157,8 @@ async function main() {
   }
   if (command === 'verify') {
     const repo = resolve(options.repo || '.')
-    const policyPath = options.policy || join(repo, 'config/change-target-policy.json')
+    const policyPath = options.policy
+    if (!policyPath) return fail(2, ['--policy is required'])
     const manifestPath = options.manifest
     if (!manifestPath) return fail(2, ['--manifest is required'])
     const result = verify(repo, policyPath, manifestPath, options.base)

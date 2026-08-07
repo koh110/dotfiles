@@ -15,7 +15,7 @@ description: 'TRIGGER when: 複数repositoryへの変更展開、skill・設定�
 ./bin/change-target-gate discover --repo . --query '<artifact or responsibility>'
 ./bin/change-target-gate verify \
   --repo . \
-  --policy config/change-target-policy.json \
+  --policy /path/to/change-target-policy.json \
   --manifest path/to/change-target-manifest.json
 ```
 
@@ -32,7 +32,7 @@ PRのtarget/base branchを先に確定し、作業branchは必ずそのtarget br
 ```bash
 PR_TARGET_BRANCH=release/1.x ./bin/change-target-gate verify \
   --repo . \
-  --policy config/change-target-policy.json \
+  --policy /path/to/change-target-policy.json \
   --manifest path/to/change-target-manifest.json \
   --base origin/release/1.x
 ```
@@ -65,7 +65,7 @@ PR_TARGET_BRANCH=release/1.x ./bin/change-target-gate verify \
 
 - Hermes、Codex、Claude、OpenCodeなどのagent名をCLIの判断材料にしない。
 - installed skill mirrorを直接編集せず、owner repositoryのsource of truthを更新してから各agentへ同期する。
-- `config/change-target-manifest.example.json`はschema例であり、実作業ではtargetごとのmanifestを作成する。
+- `skills/change-target-gate/config/change-target-manifest.example.json`はschema例であり、実作業ではtargetごとのmanifestを作成する。
 - 複数repositoryへ展開する場合はtargetごとに独立したmanifest・branch・PRとし、未計画repositoryを暗黙に追加しない。
 
 ## 完了条件

@@ -157,7 +157,7 @@ node skills/change-target-gate/scripts/change-target-gate.mjs discover --repo . 
 
 # 作業前後に、repository ownership・patch/create・実際のdiffを検証する
 node skills/change-target-gate/scripts/change-target-gate.mjs verify \
-  --policy config/change-target-policy.json \
+  --policy /path/to/change-target-policy.json \
   --manifest /path/to/change-target-manifest.json \
   --base <resolved-pr-target>
 ```
@@ -168,7 +168,7 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - originのrepository、manifestのrepository、target repositoryが一致しない場合は停止する
 - manifestにないchanged path、base ref不在、target未宣言を成功扱いにしない
 - 複数repositoryへ展開する場合は、repositoryごとにsource of truthとmanifestを解決し、各repositoryで独立してgateを実行する。Hermesを特別扱いして禁止するのではなく、未計画targetだけを拒否する
-- `config/change-target-policy.json`はこのrepositoryのadapterであり、共通の判定ロジックを複製して他agentへ埋め込まない。各repositoryは自分のcanonical repositoryとallowlistを定義する
+- `skills/change-target-gate/config/`には公開可能なschema例だけを置き、repository固有のpolicy・manifestはrepository外またはignore対象で管理する。このskillはrepositoryごとのadapterであり、共通の判定ロジックを複製して他agentへ埋め込まない。各repositoryは自分のcanonical repositoryとallowlistを定義する
 - gateが失敗した状態で編集、commit、push、issue/PR作成を続行しない
 
 ## Commit / Rebase / Push Guidelines

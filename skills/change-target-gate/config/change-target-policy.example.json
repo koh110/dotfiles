@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "repository": "koh110/dotfiles",
+  "repository": "OWNER/REPOSITORY",
   "defaultBranch": "main",
   "allowedRepositories": [
-    "koh110/dotfiles"
+    "OWNER/REPOSITORY"
   ],
   "requireManifest": true
 }
