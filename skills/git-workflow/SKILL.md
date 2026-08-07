@@ -123,6 +123,42 @@ git status --short  # まだ原本を保持していることを確認
 
 一時fileはtargetとrootの検証完了後に削除する。自動移植が必要なら`fail-closed-automation`を適用し、artifact ownershipとconcurrent writerを別途扱う。
 
+## Minimum-Diff and Scope Gate
+
+明示的な指定がない限り、作業は最新の remote `main` を起点にし、依頼の目的達成に必要な最小差分だけを含める。
+
+作業開始前に、以下を確認する。
+
+- 目的、受け入れ条件、変更対象を列挙する
+- 現在の branch、worktree、`origin/main`との差分を確認する
+- 各変更が目的達成に必要かを確認する
+- 未マージbranch、作業途中worktree、関連機能の実装を暗黙の土台にしない
+- 関連機能を含める場合は、import、route、schema、runtime call、再現可能な失敗ログなどの具体的な依存を確認する
+
+実装後は `origin/main` との差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
+
+## Portable Change-Target Gate
+
+repositoryやagentをまたいで変更を展開する場合、Hermes/Codex等のagent固有機能や、ロード済みskillの記憶だけでtargetを決めない。リポジトリ非依存の`tools/change-target-gate.mjs`を実行し、manifestで宣言したrepository・base・artifact・pathだけを変更対象にする。
+
+```bash
+# 既存artifactを先に探索する
+node tools/change-target-gate.mjs discover --repo . --query "git workflow"
+
+# 作業前後に、repository ownership・patch/create・実際のdiffを検証する
+node tools/change-target-gate.mjs verify \
+  --policy config/change-target-policy.json \
+  --manifest /path/to/change-target-manifest.json \
+  --base origin/main
+```
+
+- `patch`対象がbase refに存在しない場合、`create`対象が既に存在する場合は停止する
+- originのrepository、manifestのrepository、target repositoryが一致しない場合は停止する
+- manifestにないchanged path、base ref不在、target未宣言を成功扱いにしない
+- 複数repositoryへ展開する場合は、repositoryごとにsource of truthとmanifestを解決し、各repositoryで独立してgateを実行する。Hermesを特別扱いして禁止するのではなく、未計画targetだけを拒否する
+- `config/change-target-policy.json`はこのrepositoryのadapterであり、共通の判定ロジックを複製して他agentへ埋め込まない。各repositoryは自分のcanonical repositoryとallowlistを定義する
+- gateが失敗した状態で編集、commit、push、issue/PR作成を続行しない
+
 ## Commit / Rebase / Push Guidelines
 
 - status を見ずに commit しない

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "repository": "koh110/dotfiles",
+  "base": "origin/main",
+  "propagationId": "example-2026-08",
+  "targets": [
+    {
+      "repository": "koh110/dotfiles",
+      "path": "skills/git-workflow/SKILL.md",
+      "operation": "patch",
+      "reason": "既存の責務を持つskillを更新する"
+    }
+  ],
+  "allowedChangedPaths": [
+    "skills/git-workflow/SKILL.md"
+  ]
+}
