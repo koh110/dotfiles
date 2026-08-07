@@ -13,6 +13,20 @@ description: 'TRIGGER when: git repository で状態確認、branch 作成、差
 - destructive な git 操作は、対象 path と復元手段を確認してから実行する
 - main checkout に feature 変更を残したまま完了扱いにしない
 
+## Minimum-Diff and Scope Gate
+
+明示的な指定がない限り、作業は最新の remote `main` を起点にし、依頼の目的達成に必要な最小差分だけを含める。
+
+作業開始前に、以下を確認する。
+
+- 目的、受け入れ条件、変更対象を列挙する
+- 現在の branch、worktree、`origin/main`との差分を確認する
+- 各変更が目的達成に必要かを確認する
+- 未マージbranch、作業途中worktree、関連機能の実装を暗黙の土台にしない
+- 関連機能を含める場合は、import、route、schema、runtime call、再現可能な失敗ログなどの具体的な依存を確認する
+
+実装後は `origin/main` との差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
+
 ## Worktree Context Detection
 
 Git 操作や編集を始める前に、以下を実行する。
