@@ -149,14 +149,14 @@ git status --short  # まだ原本を保持していることを確認
 
 ## Portable Change-Target Gate
 
-repositoryやagentをまたいで変更を展開する場合、Hermes/Codex等のagent固有機能や、ロード済みskillの記憶だけでtargetを決めない。リポジトリ非依存の`tools/change-target-gate.mjs`を実行し、manifestで宣言したrepository・base・artifact・pathだけを変更対象にする。
+repositoryやagentをまたいで変更を展開する場合、Hermes/Codex等のagent固有機能や、ロード済みskillの記憶だけでtargetを決めない。リポジトリ非依存の`skills/change-target-gate/scripts/change-target-gate.mjs`を実行し、manifestで宣言したrepository・base・artifact・pathだけを変更対象にする。
 
 ```bash
 # 既存artifactを先に探索する
-node tools/change-target-gate.mjs discover --repo . --query "git workflow"
+node skills/change-target-gate/scripts/change-target-gate.mjs discover --repo . --query "git workflow"
 
 # 作業前後に、repository ownership・patch/create・実際のdiffを検証する
-node tools/change-target-gate.mjs verify \
+node skills/change-target-gate/scripts/change-target-gate.mjs verify \
   --policy config/change-target-policy.json \
   --manifest /path/to/change-target-manifest.json \
   --base <resolved-pr-target>

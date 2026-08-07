@@ -9,7 +9,7 @@ description: 'TRIGGER when: 複数repositoryへの変更展開、skill・設定�
 
 このskillは、agent固有の記憶やprovider固有のPR機能で変更先を決めず、repository内のportable CLIを使って変更targetを明示・検証するためのadapterです。
 
-共通のsemantic coreは`tools/change-target-gate.mjs`にあり、agent側は次の入口を使います。
+共通のsemantic coreは`skills/change-target-gate/scripts/change-target-gate.mjs`にあり、agent側は次の入口を使います。
 
 ```bash
 ./bin/change-target-gate discover --repo . --query '<artifact or responsibility>'

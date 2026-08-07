@@ -2,4 +2,4 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec node "$root/tools/change-target-gate.mjs" "$@"
+exec node "$root/skills/change-target-gate/scripts/change-target-gate.mjs" "$@"
