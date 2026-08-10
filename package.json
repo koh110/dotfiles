@@ -1,6 +1,9 @@
 {
   "private": true,
   "type": "module",
+  "scripts": {
+    "test:change-target": "node --test skills/change-target-gate/scripts/change-target-gate.test.mjs"
+  },
   "devDependencies": {
     "@types/node": "^22.13.14",
     "typescript": "^5.9.3"

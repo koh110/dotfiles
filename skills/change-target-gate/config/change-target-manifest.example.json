@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "repository": "OWNER/REPOSITORY",
+  "base": "origin/<target-branch>",
+  "propagationId": "example-2026-08",
+  "targets": [
+    {
+      "repository": "OWNER/REPOSITORY",
+      "path": "path/to/artifact",
+      "operation": "patch",
+      "reason": "既存の責務を持つskillを更新する"
+    }
+  ],
+  "allowedChangedPaths": [
+    "path/to/artifact"
+  ]
+}
