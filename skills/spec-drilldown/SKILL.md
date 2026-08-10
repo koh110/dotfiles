@@ -54,7 +54,7 @@ description: 'TRIGGER when: アプリケーション・新機能・CLI・API・�
 
 仕様書の作成者は、作成時に置いた思い込みを自己レビューでも見逃しやすい。ユーザー承認の前に、仕様書を独立したレビュアーへ渡し、追加質問なしでは実装できない曖昧さ・矛盾・欠落を敵対的に探させる。
 
-この節を、レビューの入力・判定schema・合格条件を定義する**クロスエージェントの正本**とする。Hermes、Claude Code、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、このskillを置き換える正本にせず、ここで定義した契約を実行するadapterとして扱う。
+この節を、**仕様書の**レビュー入力・判定schema・合格条件を定義するクロスエージェントの正本とする。実装コードのstatic scan、test/lint/build、コード差分review、実装後closureは共有の`code-review` skillを正本とし、このskillでは重複定義しない。Hermes、Claude Code、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、各正本skillを置き換えるものではなく、契約を実行するadapterとして扱う。
 
 ランタイム固有adapterを使う場合も、次を満たさなければ有効なレビュー証跡にしない:
 

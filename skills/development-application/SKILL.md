@@ -3,6 +3,15 @@ name: development-application
 description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、再利用可能な学びはskillへ反映する。'
 ---
 
+## Independent Review Gate
+
+- コードを変更する実装・リファクタリング・bugfixでは、実装開始前に共有の`code-review` skillをロードして従う
+- `code-review`が利用できない環境では、portableなレビュー契約を満たす独立reviewer（fresh context）へadapterし、特定runtimeのskill名を仮定しない
+- ローカルの実装品質ゲートは`code-review`、仕様書の質問・仕様reviewは`spec-drilldown`、GitHub PRへの取得・コメント・判定投稿はplatform adapterの責務とする
+- 2ファイル以上を変更する場合、またはcommit/pushを伴う場合は、`code-review`の独立reviewer判定を得るまで完了扱い・commit・pushをしてはならない
+- test、build、lint、生成コード検証は自己検証であり、独立reviewの代替にはならない
+- documentation-only / pure config-onlyでユーザーが明示的にverificationをskipした場合は品質ゲートを省略できる。ただし、仕様・契約上qualified reviewが必須の場合は、skipの対象外として理由を記録する
+
 ## Specification First
 
 - アプリケーション・新機能の作成依頼で仕様が曖昧な場合、実装や plan 作成に着手する前に `spec-drilldown` skill を実行し、仕様を磨き込んでから実装する
