@@ -179,6 +179,8 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
 - push 前に意図しない file が含まれていないか再確認する
+- **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。作業途中の設計判断で「commit・push してよいか」と尋ねて「ok」を得ても、それは既存 PR へ積む許可であって、**新規 PR を立てる許可ではない**。branch を分ける / PR を分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 局所的な「ok」を新規 PR 作成の許可と解釈して誤って PR を立て、close と cherry-pick の後始末に約20分を費やした)
+- **push 先 repository が公開かどうかを push 前に必ず確認する**。公開できない内容を含む branch は、push せずローカル commit に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
 - conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
 
 ## Cleanup Guidelines
