@@ -176,6 +176,7 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - status を見ずに commit しない
 - staged diff を見ずに commit しない
 - commit 前に `git diff --cached` で commit 対象を最終確認する
+- commitが `error: gpg failed to sign the data` で失敗した場合、署名鍵(1Password等)がロック中で使用できない可能性がある。diffの内容やstage漏れが原因と誤認せず、`git commit --no-gpg-sign` で1回だけ再試行してよい(fail-open)。再試行で成功した場合は無署名commitになった旨を完了報告に明記する。同じ引数の再試行でも失敗する場合は署名以外の原因を疑い、原因を報告して停止する
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
 - push 前に意図しない file が含まれていないか再確認する
