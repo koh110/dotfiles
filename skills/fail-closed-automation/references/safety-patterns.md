@@ -86,7 +86,7 @@ cleanup前に、以下をすべて要求する。
 
 `git worktree move`直前と`git worktree remove`直前の両方で、authoritative remote metadataを再fetch/再照会し、同じexclusive cleanup authority/fencing leaseを保持していることを検証する。さらにworktree registration、lock state、status、ignored file、`HEAD`、branch identity、merge evidenceを再検査する。authorityは削除またはrollbackとpostcondition検証まで保持し、生存writerがtargetを変更できない状態になった後だけreleaseする。adapterがこのwriter contractをenforceできなければ無人cleanupを拒否する。古いcwd/dirfdを保持する非協調かつ敵対的same-user processはtrusted-writer脅威モデルの外部として明示する。不一致は拒否またはrollback triggerとする。
 
-通常mergeでは、candidate `HEAD`が再照会済みauthoritative remote-default OIDのancestorであることを要求する。squash/rebase merge evidenceでは、candidate `HEAD`がmerged PRのexact head OIDと一致し、merge commit/resultが同じ再照会済みdefault OIDから到達可能であることを要求する。通常のGit CLIではbranch checkout occupancyとref削除をatomicに調整できないため、無人cleanupではlocal branchを保持する。保持したbranchを明示的follow-upとして報告し、automationでbranch名だけを使ったforce deleteを行わない。
+通常mergeでは、candidate `HEAD`が再照会済みauthoritative remote-default OIDのancestorであることを要求する。squash/rebase merge evidenceでは、candidate `HEAD`がmerged PRのexact head OIDと一致し、merge commit/resultが同じ再照会済みdefault OIDから到達可能であることを要求する。worktree削除後、local branchも`git branch -d`(safe deleteのみ)で削除してよいが、これは上記のexclusive cleanup authority/fencing leaseを保持したまま(worktree削除からbranch削除まで同一authority下で連続して)行う場合に限る。`git branch -d`は対象branchが他worktreeでcheckout中の場合に`error: cannot delete branch ... used by worktree at ...`で拒否する(実測確認済み)が、この check とref削除の間に別プロセスが新規worktreeを登録するTOCTOU窓が存在し得るため、`git branch -d`単体の拒否挙動を「concurrent checkoutに対するatomicな安全弁」とみなしてauthority/leaseの要件を代替してはならない。authorityが保持できない環境ではbranch削除を行わず、対象を明示的follow-upとして報告する。`-D`による強制削除(この保護を迂回する)やbranch名だけを使ったforce deleteは行わない。
 
 ## 7. Snapshot/baseline比較
 
