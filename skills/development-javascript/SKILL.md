@@ -40,6 +40,13 @@ function listActiveNames(users: User[]) {
 - 環境変数は `config.ts` または `config.js` からのみ読み取る
 - 他のモジュールは `config` を import して値を参照する
 
+## Date Handling
+
+- DBカラムが timezone-naive(`::timestamp`)か timezone-aware(`::timestamptz`)かによって、渡す文字列の形式を変える
+  - **timezone-naive(`::timestamp`)**: `new Date(v).toISOString()` によるUTC文字列（`Z` 付き）をそのまま渡さない。`::timestamp` は `Z` を無視して数値部分だけをそのまま格納するため、UTC文字列を渡すとJSTセッションでは時刻が09:00ずれる。プロジェクトで採用している日付ライブラリ（dayjs等）でtimezone情報を含まない明示フォーマット文字列を生成して渡す
+  - **timezone-aware(`::timestamptz`)**: 逆に timezone情報を落とした文字列を渡さない。オフセットのない文字列を渡すとDB側がセッションタイムゾーンとして解釈し、絶対時刻がずれて格納される。`new Date(v).toISOString()` のようなtimezone情報を含む文字列(またはoffset付き文字列)を渡す
+  - どちらのキャストを使うかは既存コードの慣習に揃え、同一コードベース内で混在させない
+
 ## Scripting
 
 - 使い捨てのスクリプトを作成・実行する場合は最新バージョンのNode.jsを利用する
@@ -97,6 +104,9 @@ RUN npm install --min-release-age=7
   - 詳細は [references/type-inference.md](references/type-inference.md) を参照
 - functionの返り値は指定せず推論に任せる
 - baseUrlを利用しない
+- npm workspaces monorepoで他packageを参照する場合、tsconfigの `paths` エイリアスを禁じる
+  - `paths` はpackage.jsonの `exports` マップ検証をバイパスし、存在しないsubpath importがコンパイルを通って実行時の `ERR_PACKAGE_PATH_NOT_EXPORTED` で初めて発覚する
+  - 代わりにProject References（参照先packageは `composite: true` と `declarationMap: true`）に一本化する
 - 可能な場合は必ず `as const` を記述する
 - `any` 型の利用を禁じる
   - やむをえない場合は `unknown` 型を利用し、type guardで型を絞り込む
