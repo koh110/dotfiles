@@ -55,16 +55,6 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - **アプローチを別案へ置き換えたら、旧アプローチの生成物の棚卸しを行う**。lint ルール・設定ファイル・生成コード・ドキュメントが不要になっていないかを確認し、削除要否を報告する
 - **当初の依頼から作業スコープが2段階以上拡大したら、セッション / PR の分割をユーザーへ提案する**。1セッションに詰め込むと context 枯渇と接続断で手戻りが増える（実測: lint plugin 開発 + API 契約追加 + 全面リファクタを1セッションに入れて transcript が 11MB に達し、auto-compact と接続断が多発した）
 
-## Test Infrastructure Preservation
-
-- test setup、global setup/teardown、CI script、worker設定を変更するときは、並列性・実行順序・診断logを既存のbehavior contractとして扱う
-- 「整理」「cleanup」「安定化」だけを理由に、独立処理の逐次化、worker数の削減、意図的な`console.log`や進捗logの削除を行わない
-- 変更前に、通常worker数、同時に用意されるDB/service数、test件数、運用で参照されるlogをbaseline化する
-- 独立したsetup/teardown処理は並列性を維持し、resource closeや次段階への遷移は全処理完了後に行う
-- test infrastructure変更後は、同じtest集合をsingle-worker経路と通常のparallel-worker経路で実行する
-- 性能改善または性能維持が目的なら、pass/failだけでなくworker数・test件数・所要時間または同等の並列性evidenceを報告する
-- 診断logを削除・変更する場合は、利用者と代替観測手段を確認し、その意図をtestまたはコメントへ残す
-
 ## Platform Constraint Guidelines
 
 - クラウド/プラットフォームの制約に当たって回避策を設計する前に、**その制約自体を持たない代替サービス・後継機能がないかを必ず調査する**。制約は「所与の事実」ではなく「そのサービス世代の制約」であることが多い（例: classic EventBridge Rules はスケジュールをデフォルトバスにしか置けないが、後継の EventBridge Scheduler は Universal Target で任意のバス/API へ直接配信できる）
