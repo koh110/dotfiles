@@ -57,6 +57,7 @@ git worktree list
 ## Existing Linked Worktree Guidelines
 
 - `git_dir != common_dir` なら `git worktree add` を実行しない
+- **harness(Claude Code)が事前に用意した worktree(`.claude/worktrees/<name>/` 等)も、手動・agent作成の worktree と同様に既存の linked worktree として扱う**。「規約に沿っていないのでは」と疑って独自の `.worktree/` を新設しない。harness提供のworktreeか手動作成かで扱いを変える必要はなく、`git_dir != common_dir` である以上は現在の worktree をそのまま再利用する
 - 現在の worktree の path、branch、status を確認し、そのタスク専用として安全に利用できることを確認する
 - 既に適切な専用 branch にいる場合は、その branch と worktree をそのまま使う
 - detached HEAD で未変更なら、原則として編集前に専用 branch を作る
@@ -173,16 +174,21 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 
 ## Commit / Rebase / Push Guidelines
 
+- この skill の記述(description の「commit を完結させる」を含む)は commit / push をどの worktree で行うかの作法を定めるものであり、commit / push 実行の許可を与えるものではない
+- 「commit はユーザーの明示的許可がある場合のみ」というシステム / ユーザー指示を、この skill の手順が上書きすることはない。許可が確認できない場合は commit せず、変更内容を報告して停止する
+- AskUserQuestion の timeout 自動応答(「No response — proceed using your best judgment」等)を commit / push などの destructive 操作への明示的同意として扱わない
 - status を見ずに commit しない
 - staged diff を見ずに commit しない
 - commit 前に `git diff --cached` で commit 対象を最終確認する
 - commitが `error: gpg failed to sign the data` で失敗した場合、署名鍵(1Password等)がロック中で使用できない可能性がある。diffの内容やstage漏れが原因と誤認せず、`git commit --no-gpg-sign` で1回だけ再試行してよい(fail-open)。再試行で成功した場合は無署名commitになった旨を完了報告に明記する。同じ引数の再試行でも失敗する場合は署名以外の原因を疑い、原因を報告して停止する
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
+- PR を独自フォーマットで書き始めない。作成前に対象 repository の `.github/PULL_REQUEST_TEMPLATE.md` と直近の merge 済み PR を確認し、実運用の body 形式(見出し構成等)に合わせる
 - push 前に意図しない file が含まれていないか再確認する
 - **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。作業途中の設計判断で「commit・push してよいか」と尋ねて「ok」を得ても、それは既存 PR へ積む許可であって、**新規 PR を立てる許可ではない**。branch を分ける / PR を分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 局所的な「ok」を新規 PR 作成の許可と解釈して誤って PR を立て、close と cherry-pick の後始末に約20分を費やした)
-- **push 先 repository が公開かどうかを push 前に必ず確認する**。公開できない内容を含む branch は、push せずローカル commit に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
+- **push 先 repository が公開かどうかを push 前に必ず確認する**。業務コンテキストや社内情報など公開できない内容を含む branch は、push 自体がデータの持ち出しになるため、push せずローカル commit(必要なら deploy)に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
 - conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
+- **検証・実験目的で作成した worktree(review gate や hook の動作確認、再現手順の検証など、成果物を残すこと自体が目的でない作業)での変更は、目的を達成したらデフォルトで commit せず破棄する**。finish-review 等の通常フローに引きずられて commit へ向かわない。成果物として残す必要があると判断した場合は、その旨と target branch を明示してユーザーに確認してから commit する(実測: gate動作検証用の worktree で修正をそのまま commit しようとしたが、AskUserQuestion で「検証用なので commit しなくていい、削除してよい」と訂正された)
 
 ## Cleanup Guidelines
 
@@ -194,7 +200,7 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - 手動cleanupでもtrackedだけでなくuntracked・ignored fileを個別に検査し、1つでもあれば削除しない
 - 手動・自動を問わず破壊的cleanupでは`fail-closed-automation` skillを併用し、そのGit worktree cleanup predicatesをauthoritativeな安全要件として適用する
 - 最低限、tracked・untracked・ignoredが空であること、authoritative remote default名/OIDとexact merge evidenceが削除直前にも一致すること、quarantineをraw renameではなく`git worktree move`で行えることを要求する
-- worktree登録を削除して登録消滅を確認後も、無人cleanupではlocal branchを保持して明示的なfollow-up対象として報告する。通常のGit CLIでは別worktreeへのconcurrent checkoutとref削除をatomicに調整できないため、自動branch削除は行わない。remote branchも明示依頼なしに削除しない
+- worktree登録の削除を確認したら、続けてlocal branchも`git branch -d`(safe deleteのみ)で削除してよいが、これはworktree削除からbranch削除まで同一のexclusive cleanup authority/fencing lease(`fail-closed-automation`要件)を保持したまま連続して行う場合に限る。`git branch -d`は対象branchが他worktreeでcheckout中の場合に拒否する(実測確認済み: `error: cannot delete branch ... used by worktree at ...`)が、このcheckとref削除の間には別プロセスが新規worktreeを登録し得るTOCTOU窓があるため、この拒否挙動単体を安全の根拠にしてauthority/leaseの保持を省略しない。`-D`による強制削除は行わない。remote branchは明示依頼なしに削除しない
 - 手動cleanupでも以下のread-only検査だけを根拠に削除してはいけない。検査後に上記のauthoritative remote/OID、merge evidence、`git worktree move` quarantine、削除直前再検証をすべて実施する
 
 ```bash
@@ -203,7 +209,18 @@ git -C .worktree/feature-short-name ls-files --others --exclude-standard
 git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standard
 ```
 
-`git worktree remove`や`git branch -d`をこのsnapshotだけに続けるshortcutは禁止する。無人cleanupはlocal branchを保持し、手動cleanupでも削除直前に全predicateと別worktreeで未使用であることを再検証する。
+`git worktree remove`や`git branch -d`をこのsnapshotだけに続けるshortcutは禁止する。無人・手動を問わず、削除直前に全predicateと別worktreeで未使用であることを再検証してから実行する。
+
+### Post-Merge Cleanup Routine
+
+ユーザーから「マージしたのでcleanupして」等、PRがmergeされた直後のcleanupを明示的に依頼された場合の定型手順。安全要件そのもの(quarantine経由の削除を含む、上記Cleanup Guidelines)は省略せず適用し、以下はその手順に加えて確認すべき点を補う。
+
+1. `gh pr view <number-or-branch> --json state,mergedAt` でmerge済みであることを確認する(mergeされていない、または確認できない場合は中止する)
+2. 上記Cleanup Guidelinesの安全要件(tracked/untracked/ignoredが空、authoritative remote default名/OIDとexact merge evidenceの一致)を先に確認する。満たさない場合はここで中止し、以降のteardown・quarantine・削除には進まない
+3. 安全要件を満たすことを確認できたら、対象worktreeでdocker compose等のプロセス・コンテナを起動していた場合に限り `docker compose down`(または同等のteardownコマンド)を実行する。この時点ではまだ`git worktree move`でquarantineしていないためCompose定義はまだ存在する。**この順序が重要**: 安全性検証より前にteardownすると、誤って別worktreeやdirtyなworktreeのコンテナ・プロセスを停止してしまう。逆にquarantine・削除の後でteardownしようとすると、対象のCompose定義ごと消えており実行不能になる
+4. 上記Cleanup Guidelinesの手順どおり `git worktree move` でquarantineし、quarantine後に安全要件を再検証してから `git worktree remove` する。read-only検査だけを根拠に直接削除しない
+5. local branchを削除する(`git branch -d`。safe deleteのみ、`-D`は使わない)。squash/rebase mergeの場合、branchの先端commitがdefault branchの祖先にならず`git branch -d`が「not fully merged」で失敗することがある。この場合`-D`で強制削除せず、branchを保持したまま明示的なfollow-up対象として報告する(手順1で確認したPRのmerge自体は正当なので、削除の失敗はcleanup対象の見落としではない)
+6. remote branchは明示依頼がない限り削除しない(GitHubのauto-delete設定に委ねるか、別途確認する)
 
 ## Common Pitfalls
 
@@ -226,6 +243,7 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - `git_dir == common_dir` でコード変更を行うなら、root checkout ではなく `.worktree/` 配下の専用 worktree を作成して移動すること
 - detached HEAD のまま commit / rebase / push しないこと
 - コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
+- commit / push への明示的許可が確認できない場合、この skill を根拠に commit / push を実行しないこと。timeout による自動応答は明示的許可ではない
 - commit / push を行う場合、完了報告前に `git diff --cached` と対象 branch / commit SHA を必ず確認すること
 - main checkout に feature 変更が残っている場合、その時点で未完了として扱い、cleanup を優先すること
 - root checkout で変更を続けていた、または `.worktree/` guideline に違反していた場合、その時点で未完了として扱い、worktree への移植と root の復元を優先すること
