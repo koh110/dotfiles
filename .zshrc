@@ -65,7 +65,7 @@ function tmux_context_theme_values() {
     local current_window_fg="colour255"
 
     case "$host" in
-        dev-server)
+        dev-server|dev-ubuntu)
             pane_bg="colour18"
             active_bg="colour18"
             status_bg="colour25"
