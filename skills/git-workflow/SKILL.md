@@ -1,12 +1,13 @@
 ---
 name: git-workflow
-description: 'TRIGGER when: git repository で状態確認、branch 作成、差分確認、commit、rebase、push、worktree 作成、cleanup などの git 操作全般を行うとき。コード変更では既存の linked worktree を再利用し、root checkout にいる場合だけ repository root 配下の `.worktree/` に専用 worktree を作成して、編集・test・lint・build・commit を完結させる。'
+description: 'TRIGGER when: git repository で状態確認、branch 作成、差分確認、commit、rebase、push、worktree 作成、cleanup などの git 操作全般を行うとき、またはその repository 配下でソースコードやドキュメント(設計docなど、後で commit や review の対象になりうる成果物)を新規作成・編集するとき。既存の linked worktree を再利用し、root checkout にいる場合だけ repository root 配下の `.worktree/` に専用 worktree を作成して、編集・test・lint・build・commit を完結させる。'
 ---
 
 ## General Guidelines
 
 - 最初に repository root、Git dir、common Git dir、branch、working tree、worktree 一覧を確認する
 - repository root checkout を feature / fix / refactor / chore の継続的な作業場所として利用しない
+- この skill における「コード変更」は、ソースコードに限らず、`docs/` 配下の設計ドキュメントなど、後で commit や review の対象になりうる成果物の作成・編集を含む。「ドキュメントだけだから root checkout のままでよい」とは判断しない
 - コード変更を伴う作業では、現在地が linked worktree ならその worktree を再利用し、root checkout なら専用 worktree を作成する
 - linked worktree 内で新しい worktree を入れ子に作成しない
 - `git status`, `git diff`, branch 名を確認せずに commit / rebase / push / cleanup を行わない
@@ -234,6 +235,7 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - branch 名や commit SHA を確認せず push / PR を作成する
 - cleanup 系コマンドを対象確認なしで実行する
 - feature 作業後も main checkout に変更を残す
+- ドキュメント作成のみだから worktree は不要と判断し、root checkout で作業する(実測: 別々の session が並行して root checkout に設計ドキュメントをそれぞれ untracked で作成し、各 session の stop 時 review が root の diff 全体を対象にしたため、他 session の未 commit 変更まで自分のレビュー対象に混入した)
 
 ## Mandatory Skill Enforcement
 
