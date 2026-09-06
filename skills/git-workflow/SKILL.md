@@ -175,9 +175,6 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 
 ## Commit / Rebase / Push Guidelines
 
-- この skill の記述(description の「commit を完結させる」を含む)は commit / push をどの worktree で行うかの作法を定めるものであり、commit / push 実行の許可を与えるものではない
-- 「commit はユーザーの明示的許可がある場合のみ」というシステム / ユーザー指示を、この skill の手順が上書きすることはない。許可が確認できない場合は commit せず、変更内容を報告して停止する
-- AskUserQuestion の timeout 自動応答(「No response — proceed using your best judgment」等)を commit / push などの destructive 操作への明示的同意として扱わない
 - status を見ずに commit しない
 - staged diff を見ずに commit しない
 - commit 前に `git diff --cached` で commit 対象を最終確認する
@@ -186,10 +183,10 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - push / PR 前に公開したい commit SHA を確認する
 - PR を独自フォーマットで書き始めない。作成前に対象 repository の `.github/PULL_REQUEST_TEMPLATE.md` と直近の merge 済み PR を確認し、実運用の body 形式(見出し構成等)に合わせる
 - push 前に意図しない file が含まれていないか再確認する
-- **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。作業途中の設計判断で「commit・push してよいか」と尋ねて「ok」を得ても、それは既存 PR へ積む許可であって、**新規 PR を立てる許可ではない**。branch を分ける / PR を分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 局所的な「ok」を新規 PR 作成の許可と解釈して誤って PR を立て、close と cherry-pick の後始末に約20分を費やした)
+- **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。既存PRへ追加変更を反映する場合に、別branchや新規PRへ分割してはならない。branchを分ける / PRを分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 既存PRへの追加変更を新規PR作成の許可と誤解し、closeとcherry-pickの後始末が発生した)
 - **push 先 repository が公開かどうかを push 前に必ず確認する**。業務コンテキストや社内情報など公開できない内容を含む branch は、push 自体がデータの持ち出しになるため、push せずローカル commit(必要なら deploy)に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
 - conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
-- **「検証・実験目的で作成した worktree」の変更だけは、検証完了後にデフォルトで commit せず破棄する**。ここでいう検証・実験目的とは、review gate・hook・再現手順などを確認すること自体が成果物であり、コード修正を成果物として残す依頼ではない場合に限る。通常の feature / fix / refactor / chore / release 作業のworktreeや、実装を検証するためにテストを実行しているworktreeは、この例外に含めない。通常作業のcommit要否は、別途ユーザーの明示的なcommit依頼または承認で判断する。検証用変更を成果物として残す場合は、target branchとcommit対象を明示してユーザーに確認してからcommitする(実測: gate動作検証用のworktreeで修正をそのままcommitしようとしたが、検証用なのでcommit不要で削除してよいと訂正された)
+
 
 ## Cleanup Guidelines
 
@@ -245,7 +242,7 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - `git_dir == common_dir` でコード変更を行うなら、root checkout ではなく `.worktree/` 配下の専用 worktree を作成して移動すること
 - detached HEAD のまま commit / rebase / push しないこと
 - コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
-- commit / push への明示的許可が確認できない場合、この skill を根拠に commit / push を実行しないこと。timeout による自動応答は明示的許可ではない
+
 - commit / push を行う場合、完了報告前に `git diff --cached` と対象 branch / commit SHA を必ず確認すること
 - main checkout に feature 変更が残っている場合、その時点で未完了として扱い、cleanup を優先すること
 - root checkout で変更を続けていた、または `.worktree/` guideline に違反していた場合、その時点で未完了として扱い、worktree への移植と root の復元を優先すること
