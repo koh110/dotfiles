@@ -189,7 +189,7 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。作業途中の設計判断で「commit・push してよいか」と尋ねて「ok」を得ても、それは既存 PR へ積む許可であって、**新規 PR を立てる許可ではない**。branch を分ける / PR を分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 局所的な「ok」を新規 PR 作成の許可と解釈して誤って PR を立て、close と cherry-pick の後始末に約20分を費やした)
 - **push 先 repository が公開かどうかを push 前に必ず確認する**。業務コンテキストや社内情報など公開できない内容を含む branch は、push 自体がデータの持ち出しになるため、push せずローカル commit(必要なら deploy)に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
 - conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
-- **検証・実験目的で作成した worktree(review gate や hook の動作確認、再現手順の検証など、成果物を残すこと自体が目的でない作業)での変更は、目的を達成したらデフォルトで commit せず破棄する**。finish-review 等の通常フローに引きずられて commit へ向かわない。成果物として残す必要があると判断した場合は、その旨と target branch を明示してユーザーに確認してから commit する(実測: gate動作検証用の worktree で修正をそのまま commit しようとしたが、AskUserQuestion で「検証用なので commit しなくていい、削除してよい」と訂正された)
+- **「検証・実験目的で作成した worktree」の変更だけは、検証完了後にデフォルトで commit せず破棄する**。ここでいう検証・実験目的とは、review gate・hook・再現手順などを確認すること自体が成果物であり、コード修正を成果物として残す依頼ではない場合に限る。通常の feature / fix / refactor / chore / release 作業のworktreeや、実装を検証するためにテストを実行しているworktreeは、この例外に含めない。通常作業のcommit要否は、別途ユーザーの明示的なcommit依頼または承認で判断する。検証用変更を成果物として残す場合は、target branchとcommit対象を明示してユーザーに確認してからcommitする(実測: gate動作検証用のworktreeで修正をそのままcommitしようとしたが、検証用なのでcommit不要で削除してよいと訂正された)
 
 ## Cleanup Guidelines
 
