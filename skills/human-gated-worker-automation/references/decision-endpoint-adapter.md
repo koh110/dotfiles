@@ -1,12 +1,12 @@
 # Decision endpoint adapter pattern
 
-When a Worker exposes a human-gated decision endpoint, do not infer the wire shape from the prose `action=skip` requirement. First submit a harmless schema probe (still using the prepared run/hash) and use validation errors to distinguish:
+Workerが人間承認付きのdecision endpointを公開している場合、文章上の `action=skip` 要件だけからwire formatを推測しないでください。まずprepared run/hashを使ったまま、side effectを発生させないschema probeを行い、validation errorから次を判別します。
 
-- one decision per field vs. one decision per entity;
-- scalar field lists vs. a `fields` record;
-- recommendation state vs. field action state.
+- fieldごとに1 decisionなのか、entityごとに1 decisionなのか
+- scalarなfield listなのか、`fields` recordなのか
+- recommendation stateとfield action stateが別なのか
 
-A known-good shape for an entity-level endpoint is:
+entity単位endpointで利用できる形の例です。
 
 ```json
 {
@@ -26,6 +26,6 @@ A known-good shape for an entity-level endpoint is:
 }
 ```
 
-The recommendation enum and field record are API-specific; verify them from the live validator or project contract. The important invariant is that every entity's `updatableFields` is represented, every field action is explicitly `skip`, and no proposed value key is sent.
+recommendation enumやfield recordの形式はAPI固有なので、live validatorまたはproject contractから確認してください。重要な不変条件は、すべてのentityの `updatableFields` が表現され、すべてのfield actionが明示的に `skip` となり、proposed valueのkeyを送らないことです。
 
-For scheduled jobs whose final response targets the same chat thread, a runtime or chat adapter may suppress a duplicate-target post. If an additional exact candidate message must be posted before the final report, use the adapter's documented separate-send mechanism, then verify the returned message ID. Do not alter the candidate body.
+scheduled jobのfinal responseが同じchat threadをtargetにする場合、runtimeやchat adapterによってduplicate-target postが抑止されることがあります。final reportの前に追加で完全一致のcandidate messageをpostする必要がある場合は、adapterがdocumentしているseparate-send mechanismを使い、返されたmessage IDを確認してください。candidate bodyは変更しないでください。
