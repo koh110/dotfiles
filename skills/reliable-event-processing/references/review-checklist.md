@@ -1,39 +1,39 @@
 # Reliable event workflow review checklist
 
-Use this checklist as an adversarial-review input, not as an implementation template.
+このchecklistはimplementation templateではなく、adversarial reviewの入力として使います。
 
-## Producer and transaction
+## Producerとtransaction
 
-- Can the actual producer runtime call the queue binding directly? If not, where is the durable outbox and how is it relayed?
-- Does one database transaction contain business state, idempotency result, and outbox rows?
-- Are local, CI, and production transaction prerequisites verified before traffic is accepted?
-- What happens when the same idempotency key arrives concurrently? Specify duplicate-key and transaction-conflict handling.
-- What exact request components are canonically hashed? Include all effect-bearing method/path/query/body/header inputs or prohibit them.
-- What response status, location, and cookie headers are persisted and replayed?
+- 実際のproducer runtimeはqueue bindingを直接呼べるか。呼べない場合、durable outboxはどこにあり、どのようにrelayされるか。
+- 1つのdatabase transactionにbusiness state、idempotency result、outbox rowが含まれているか。
+- trafficを受け入れる前に、local、CI、productionそれぞれでtransaction prerequisiteを確認しているか。
+- 同じidempotency keyが同時到着した場合に何が起こるか。duplicate-keyとtransaction-conflictのhandlingを明示しているか。
+- どのrequest componentをcanonical hashの対象にするか。effectに影響するmethod/path/query/body/header inputをすべて含めるか、禁止項目を明示しているか。
+- response status、location、cookie headerのどれを永続化し、replayするか。
 
-## Envelope, limits, and ordering
+## Envelope、limit、ordering
 
-- List every event type, payload schema, legal destination, callback route, and runtime validation rule.
-- Specify a versioned envelope with stable application `eventId`; do not substitute a provider transport ID.
-- Verify current provider maximum message bytes, batch bytes, batch count, and retention. Preflight serialized size before committing the business mutation.
-- Bound synchronous work: event count, batches, total deadline, and per-call timeout. State the response after a partial batch sequence.
-- State whether effects are order-independent. Otherwise include aggregate ordering key/version and transactional stale-event rejection.
+- すべてのevent type、payload schema、許可されたdestination、callback route、runtime validation ruleを列挙しているか。
+- stableなapplication `eventId` を持つversioned envelopeを定義しているか。providerのtransport IDで代用していないか。
+- providerの現在の最大message bytes、batch bytes、batch count、retentionを確認しているか。business mutationをcommitする前にserialized sizeをpreflightしているか。
+- synchronous workをboundedにしているか。event count、batch数、total deadline、per-call timeoutを定義し、partial batch sequence後のresponseも明示しているか。
+- effectがorder-independentか明示しているか。そうでない場合、aggregate ordering key/versionとtransactional stale-event rejectionを含めているか。
 
-## Recovery and operations
+## Recoveryとoperations
 
-- Claim with atomic owner/lease compare-and-set. Define empty-claim vs leased vs dispatched operation state.
-- Do not automatically delete unresolved outbox rows. Define repair/quarantine and retention after a durable terminal state.
-- Define consumer receipt retention against the permitted DLQ/manual replay horizon.
-- Define DLQ source retention. If provider retention is shorter than promised re-drive time, archive unchanged validated envelopes durably before acknowledgment.
-- Define a protected re-drive method that preserves `eventId`, validates the original envelope, records an audit entry, and cannot mutate on malformed input.
-- Emit structured relay logs: event ID, operation ID, attempt, claim outcome, lease age, oldest pending age, failure category, and counts. Document Dashboard/log queries and escalation thresholds.
+- atomicなowner/lease compare-and-setでclaimしているか。empty claim、leased、dispatchedのoperation stateを定義しているか。
+- unresolvedなoutbox rowを自動deleteしていないか。durable terminal state到達後のrepair/quarantineとretentionを定義しているか。
+- 許可されたDLQ/manual replay horizonに対してconsumer receipt retentionを定義しているか。
+- DLQ source retentionを定義しているか。provider retentionが約束したre-drive期間より短い場合、acknowledgment前にvalidated envelopeを変更せずdurable archiveしているか。
+- `eventId` を維持し、original envelopeをvalidateし、audit entryを記録し、malformed inputではmutationしないprotected re-drive methodを定義しているか。
+- structured relay logとしてevent ID、operation ID、attempt、claim outcome、lease age、oldest pending age、failure category、countを出しているか。Dashboard/log queryとescalation thresholdもdocumentしているか。
 
-## Proxy and realtime boundary
+## Proxyとrealtime boundary
 
-- Strip client-supplied internal and forwarding headers; set one trusted forwarding chain. Define host, raw path/query, redirects, request abort, cookies, CORS, and streaming behavior.
-- If gateway policy depends on command classification, make it exhaustive/versioned. Prefer protecting all requests of a method/path when body inspection conflicts with streaming.
-- Specify the exact realtime frame field(s) that carry stable `eventId`, and its persistence/de-duplication horizon relative to all replay paths.
+- client-supplied internal/forwarding headerを除去し、trusted forwarding chainを1つ設定しているか。host、raw path/query、redirect、request abort、cookie、CORS、streaming behaviorを定義しているか。
+- gateway policyがcommand classificationに依存する場合、classificationをexhaustiveかつversionedにしているか。body inspectionとstreamingが衝突するなら、method/path単位ですべてのrequestを保護する方を優先しているか。
+- stableな `eventId` を保持するrealtime frame fieldを正確に定義し、すべてのreplay pathに対するpersistence/de-duplication horizonを明示しているか。
 
-## Deterministic tests
+## Deterministic test
 
-Test: same-key race; transaction abort; direct publish rejection; accepted-send/failed-ack crash; lease expiry; duplicate delivery; stale ordering; callback five-retry/DLQ; archived manual re-drive; payload/count cap; missing indexes; unauthenticated internal calls; proxy OAuth/cookie/CORS/SSE behavior; and replica-set startup in local/CI.
+次をtestする: same-key race、transaction abort、direct publish rejection、accepted-send/failed-ack crash、lease expiry、duplicate delivery、stale ordering、callback five-retry/DLQ、archived manual re-drive、payload/count cap、missing index、unauthenticated internal call、proxy OAuth/cookie/CORS/SSE behavior、local/CIでのreplica-set startup。
