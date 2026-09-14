@@ -1,12 +1,12 @@
 # Materialized read-model publication
 
-Use this pattern when asynchronous work turns a mutable source-of-truth record into immutable JSON/HTML artifacts behind a stable read URL.
+mutableなsource of truth recordから、stableなread URLの背後に置くimmutableなJSON/HTML artifactを非同期生成するときに使うpatternです。
 
-## Separate the stages
+## Stageを分離する
 
-A publisher CLI can be implemented and verified before selecting an outbox relay or scheduler, but this is only a publication primitive—not an end-to-end eventual-delivery guarantee.
+outbox relayやschedulerを決める前にpublisher CLIだけを実装・検証することはできますが、それはpublication primitiveにすぎず、end-to-endのeventual-delivery guaranteeではありません。
 
-Keep these contracts distinct:
+次のcontractを分離して扱います。
 
 1. source mutation → durable event/outbox
 2. event claim/order/retry → publisher invocation
@@ -14,38 +14,38 @@ Keep these contracts distinct:
 4. immutable artifact write → stable manifest switch
 5. stable manifest → read-path rendering/cache
 
-Mark unimplemented stages explicitly. Do not claim “post保存ごとに反映” when only stages 3–5 exist.
+未実装stageは明示してください。stage 3〜5しか存在しないのに「post保存ごとに反映」と説明しないでください。
 
 ## Immutable revision + manifest switch
 
-Recommended key shape:
+推奨key構成:
 
 ```text
 records/{id}/revisions/sha256-{contentHash}/page.json
 records/{id}/manifest.json
 ```
 
-Publication order:
+publication順序:
 
-1. Validate and canonically serialize the page JSON.
-2. Hash the exact bytes that will be stored.
-3. Create the revision object with `If-None-Match: *`; if it already exists, verify stored hash metadata instead of overwriting.
-4. Read the current manifest and ETag.
-5. Reject source-version regression.
-6. Update the manifest with `If-Match: <etag>` or, if absent, `If-None-Match: *`.
-7. On precondition failure, re-read and re-evaluate; do not blindly retry the same write.
+1. page JSONをvalidateしcanonical serializeする。
+2. 実際に保存するbyte列そのものをhashする。
+3. `If-None-Match: *` でrevision objectを作成する。すでに存在する場合はoverwriteせず、保存済みhash metadataを検証する。
+4. current manifestとETagを読む。
+5. source-version regressionをrejectする。
+6. manifestが存在する場合は `If-Match: <etag>`、存在しない場合は `If-None-Match: *` で更新する。
+7. precondition failure時は再読込して再評価する。同じwriteをblind retryしない。
 
-The manifest must be the last visibility switch. A revision upload failure must leave the previous manifest unchanged.
+manifestを最後のvisibility switchにしてください。revision uploadが失敗してもprevious manifestは変更されてはいけません。
 
-## Source ordering is a first-class field
+## Source orderingをfirst-class fieldにする
 
-Include a source-derived ordering value such as `sourceModifiedAt`, source revision, or outbox sequence. Generation time alone is not adequate ordering: retries and concurrent workers can finish out of order.
+`sourceModifiedAt`、source revision、outbox sequenceなど、source由来のordering valueを含めます。generation timeだけではorderingとして不十分です。retryやconcurrent workerは順不同で完了する可能性があります。
 
-A timestamp is sufficient only when the source contract guarantees monotonic updates at the needed resolution. Otherwise use a database revision/sequence. Equal ordering values with different content are a conflict and should fail closed.
+timestampで十分なのは、必要なresolutionでsource contractがmonotonic updateを保証する場合だけです。それ以外はdatabase revision/sequenceを使います。同じordering valueでcontentが異なる場合はconflictとしてfail closedします。
 
 ## Unpublish/delete
 
-Refusing to publish a draft does not revoke a previously published artifact. Define an explicit tombstone manifest:
+draftのpublishを拒否するだけでは、以前publish済みのartifactは取り消されません。明示的なtombstone manifestを定義します。
 
 ```json
 {
@@ -57,78 +57,78 @@ Refusing to publish a draft does not revoke a previously published artifact. Def
 }
 ```
 
-Readers return a deterministic 404/410 according to product semantics and never fall back to the old revision. Old immutable objects may remain until a separately designed lifecycle policy removes them.
+readerはproduct semanticsに従ってdeterministicに404/410を返し、古いrevisionへfallbackしません。古いimmutable objectは、別途設計したlifecycle policyで削除するまで残して構いません。
 
-Physical deletion is harder because the source row may no longer provide an ordering value. The outbox/event must carry the record ID and source sequence before deletion, or the deletion workflow must write a durable tombstone in the source transaction. Do not invent deletion ordering in the publisher from wall-clock time.
+physical deletionはさらに難しくなります。source row削除後はordering valueを取得できない可能性があるためです。outbox/eventにrecord IDとsource sequenceを削除前に含めるか、deletion workflowがsource transaction内でdurable tombstoneを書く必要があります。publisher側でwall-clock timeからdeletion orderingを捏造しないでください。
 
-## DB-less reconciliation as an explicit weaker contract
+## DB-less reconciliationを明示的な弱いcontractとして扱う
 
-Sometimes the product owner intentionally rejects source-side dirty/outbox state to keep a legacy database unchanged. This can be valid only when the weaker guarantee is explicit: immediate publication is best-effort, and convergence occurs after an operator or scheduler completes a full reconciliation. Do not describe this as durable event delivery.
+legacy databaseを変更しないために、product ownerがsource側のdirty/outbox stateを意図的に採用しない場合があります。この設計が有効なのは、弱いguaranteeを明示した場合だけです。immediate publicationはbest-effortであり、operatorまたはschedulerがfull reconciliationを完了した後に収束します。これをdurable event deliveryと説明しないでください。
 
-Use a fail-closed reconciliation workflow:
+fail-closedなreconciliation workflowを使います。
 
-1. Capture a complete, lightweight source inventory containing every managed ID and publication state. Record start/end time, count, and a hash; a partial scan is unusable for deletion decisions.
-2. Completely paginate the remote manifest inventory and validate every deletion candidate's actual manifest, not only list metadata or a cache index.
-3. Compute `source published - remote published` as publish-needed and `remote published - source managed/published` as tombstone candidates. Restrict both sides to an explicit owner/prefix/ID namespace.
-4. Treat objects generated at or after source-snapshot start as concurrent and skip them. Prefer a safe false negative to tombstoning a newly published record.
-5. Write an immutable dry-run plan with snapshot hashes, candidate ETags, an expiry, a candidate-count guard, and a canonical plan hash. Never apply deletions directly from streaming scan output.
-6. On apply, recheck source existence/state and current manifest ETag immediately before each tombstone CAS. Any change becomes a skip/nonzero result and requires a fresh plan.
-7. Publish a tombstone manifest; do not physically delete immutable revisions during reconciliation.
+1. managed IDとpublication stateをすべて含む、完全でlightweightなsource inventoryを取得する。開始/終了時刻、件数、hashを記録する。partial scanはdeletion判断に使えない。
+2. remote manifest inventoryを最後までpaginateし、削除candidateごとに実際のmanifestをvalidateする。list metadataやcache indexだけを信頼しない。
+3. `source published - remote published` をpublish-needed、`remote published - source managed/published` をtombstone candidateとして計算する。双方を明示的なowner/prefix/ID namespaceへ限定する。
+4. source snapshot開始時刻以降に生成されたobjectはconcurrentとみなしskipする。新しくpublishされたrecordをtombstoneするより、安全側のfalse negativeを選ぶ。
+5. snapshot hash、candidate ETag、expiry、candidate-count guard、canonical plan hashを持つimmutable dry-run planを書く。streaming scan outputから直接deleteをapplyしない。
+6. apply直前に各candidateについてsource existence/stateとcurrent manifest ETagを再確認する。変更があればskip/nonzero resultとし、fresh planを要求する。
+7. tombstone manifestをpublishする。reconciliation中にimmutable revisionをphysical deleteしない。
 
-At scale, use keyset pagination, streaming NDJSON, bounded concurrency, atomic checkpoints, and resumable reports. A full republish must not skip solely on a record's modified timestamp when rendered output also depends on taxonomy, metadata, author records, templates, plugins, or filters. If an incomplete scan, duplicate ID, invalid manifest, cursor loop, count anomaly, expired plan, or excessive tombstone count is observed, make no destructive changes.
+大規模運用ではkeyset pagination、streaming NDJSON、bounded concurrency、atomic checkpoint、resumable reportを使います。rendered outputがtaxonomy、metadata、author record、template、plugin、filterなどにも依存する場合、record modified timestampだけを根拠にfull republishをskipしてはいけません。incomplete scan、duplicate ID、invalid manifest、cursor loop、count anomaly、expired plan、過剰なtombstone countを検出したら、destructive changeを一切行わないでください。
 
-A reconciliation wall-clock may identify the observation run, but it is not proof of original deletion order. The apply-time source recheck plus manifest CAS is the safety boundary. If strict event ordering or bounded automatic recovery is required, this DB-less mode is insufficient; return to a durable source version/outbox design.
+reconciliationのwall-clockはobservation runの識別には使えますが、元のdeletion orderの証明にはなりません。apply時のsource再確認とmanifest CASがsafety boundaryです。strict event orderingやbounded automatic recoveryが必要なら、このDB-less modeでは不十分です。durable source version/outbox設計へ戻してください。
 
 ## Reader validation
 
-Readers should validate:
+readerは次をvalidateします。
 
-- manifest and page size before loading bodies
-- schema version and exact runtime schema
+- bodyを読む前のmanifest/page size
+- schema versionと正確なruntime schema
 - request ID = manifest ID = page ID
-- manifest artifact key equals the key recomputed from ID + revision
-- hash of exact page bytes equals manifest hash
-- canonical URL and other security-sensitive URLs against an allowlist
+- manifest artifact keyがID + revisionから再計算したkeyと一致すること
+- pageの正確なbyte列のhashがmanifest hashと一致すること
+- canonical URLなどsecurity-sensitiveなURLがallowlistに一致すること
 
-For `HEAD` or conditional `304`, perform the same manifest/revision selection and integrity checks as `GET`. Do not optimize `HEAD` to manifest-only validation: returning 200/304 from the manifest alone can hide a missing or corrupt revision that GET would fail to serve. If object metadata does not carry a trustworthy content hash, read and hash the exact revision bytes even for `HEAD`; response-body suppression happens only after validation.
+`HEAD` やconditional `304` でも、`GET` と同じmanifest/revision selectionとintegrity checkを行います。`HEAD` をmanifest-only validationへ最適化しないでください。manifestだけを見て200/304を返すと、GETでは提供不能なmissing/corrupt revisionを隠す可能性があります。object metadataに信頼できるcontent hashがない場合、`HEAD` でも実際のrevision bytesを読みhashしてください。response bodyを省略するのはvalidation後です。
 
-## Strict source export and sanitization boundary
+## Strict source exportとsanitization boundary
 
-When the source is WordPress or another plugin-driven CMS:
+sourceがWordPressなどplugin-driven CMSの場合:
 
-- export through the application runtime so filters/shortcodes are applied, but keep the exporter read-only and stream it over stdin rather than placing probe files in the live tree
-- prefix the machine-readable JSON line because bootstrap code may emit warnings or unrelated stdout
-- validate the exporter payload again in the publisher: exact schema, requested ID, publication state, canonical URL, source ordering, and password/private exclusions
-- sanitize `contentHtml` before artifact publication with tag/attribute/protocol allowlists plus URL-host/path policy for images and embeds; protocol filtering alone is insufficient
-- test persisted output bytes, not only the sanitizer function: scan representative live fixtures for `script`, event attributes, `javascript:`, `srcdoc`, and CSS `url()` and verify content hash against the manifest
+- application runtime経由でexportしてfilter/shortcodeを適用する。ただしexporterはread-onlyにし、live treeへprobe fileを置かずstdin経由でstreamする。
+- bootstrap codeがwarningや無関係なstdoutを出す可能性があるため、machine-readable JSON lineには識別prefixを付ける。
+- publisherでもexporter payloadを再validateする。exact schema、requested ID、publication state、canonical URL、source ordering、password/private exclusionを確認する。
+- artifact publication前に `contentHtml` をsanitizeする。tag/attribute/protocol allowlistに加え、image/embedにはURL host/path policyも適用する。protocol filteringだけでは不十分。
+- sanitizer functionだけでなくpersisted output bytesをtestする。representativeなlive fixtureを `script`、event attribute、`javascript:`、`srcdoc`、CSS `url()` についてscanし、content hashがmanifestと一致することも確認する。
 
 ## Verification ladder
 
-Do not stop at unit tests. Verify each boundary in increasing scope:
+unit testだけで終わらせず、boundaryごとにscopeを広げて検証します。
 
-1. runtime schema/parser tests, renderer escaping tests, CAS/concurrency tests
-2. typecheck and packaging/dry-run build
-3. source-runtime syntax check and read-only export of a real public record
-4. filesystem dry-run that writes revision then manifest and re-hashes stored bytes
-5. isolated local object-store + Worker E2E for GET, HEAD, conditional 304, tombstone, missing revision, and hash mismatch
+1. runtime schema/parser test、renderer escaping test、CAS/concurrency test
+2. typecheckとpackaging/dry-run build
+3. source runtimeのsyntax checkとreal public recordのread-only export
+4. revision → manifestの順に書き、保存byteを再hashするfilesystem dry-run
+5. isolated local object store + Worker E2EでGET、HEAD、conditional 304、tombstone、missing revision、hash mismatchを検証
 
-If the local runtime rejects a future compatibility date, first align the pinned CLI/runtime package with that date; do not weaken the production compatibility date merely to make an old local binary start. Treat this as a setup correction, then rerun the E2E.
+local runtimeがfuture compatibility dateを拒否する場合は、まずpinned CLI/runtime packageをそのdateに対応させてください。古いlocal binaryを動かすためだけにproduction compatibility dateを弱めないでください。setup correction後にE2Eをやり直します。
 
 ## Failure policy
 
-- Broken/invalid new manifest: deterministic 5xx; do not silently fall back to origin unless the product explicitly accepts origin-load amplification.
-- Publication failure: keep the last successful manifest.
-- Tombstone: cache only according to the republish latency contract.
-- Error responses: do not expose storage keys, stack traces, credentials, or artifact body.
+- broken/invalidなnew manifest: deterministicな5xxを返す。productがorigin-load amplificationを明示的に許容しない限りoriginへsilent fallbackしない。
+- publication failure: last successful manifestを維持する。
+- tombstone: republish latency contractに従ってのみcacheする。
+- error response: storage key、stack trace、credential、artifact bodyを露出しない。
 
 ## Test matrix
 
-- revision write failure leaves manifest untouched
-- manifest CAS conflict with newer source rejects stale worker
-- equal source version + different content fails closed
-- retry of identical revision is idempotent
-- tombstone supersedes published revision
-- delayed publish cannot supersede newer tombstone
-- missing revision behind valid manifest fails GET and HEAD consistently
-- hash/key/ID mismatch is rejected
-- no automatic origin fallback under artifact failure
+- revision write failureでmanifestが変更されない
+- newer sourceとのmanifest CAS conflictでstale workerをrejectする
+- source versionが同じでcontentが異なる場合fail closedする
+- identical revisionのretryがidempotentである
+- tombstoneがpublished revisionをsupersedeする
+- delayed publishがnewer tombstoneをsupersedeできない
+- valid manifestの背後でrevisionがmissingな場合、GETとHEADが一貫してfailする
+- hash/key/ID mismatchをrejectする
+- artifact failure時にautomatic origin fallbackしない
