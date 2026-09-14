@@ -1,4 +1,4 @@
-# Reliable LLM batch inference
+# 信頼性の高いLLM batch inference
 
 大量のrepo比較、分類、Map/Reduceなど、LLM requestを多数非同期実行するworkloadの設計指針。
 
@@ -59,7 +59,7 @@ batch全体ではなく失敗した`custom_id`だけ再投入する。provider�
 - cache read/creation/uncached inputを分離して観測する。
 - prompt cacheは短期rate-limit利用効率を改善するが、subscription allowanceをproduction capacityへ変えるものではない。
 
-## Quality and capacity gates
+## 品質・capacity gate
 
 最低限、以下を測定する。
 
