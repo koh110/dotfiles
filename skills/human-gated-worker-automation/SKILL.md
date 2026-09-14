@@ -1,13 +1,7 @@
 ---
 name: human-gated-worker-automation
 description: Use when designing an agent-orchestrated automation that gathers data in a Worker/API, asks a human to review proposed updates in a chat interface, and applies confirmed changes to durable storage. Covers prepare-confirm-apply APIs, advisory confidence, entity-level partial success, idempotency, snapshots, and model/Worker responsibility boundaries.
-version: 1.0.0
-author: Hermes Agent
 license: MIT
-metadata:
-  hermes:
-    tags: [human-gating, workers, approvals, idempotency, snapshots]
-    related_skills: [spec-drilldown, reliable-event-processing, fail-closed-automation]
 ---
 
 # Human-gated Worker Automation
