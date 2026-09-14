@@ -1,13 +1,7 @@
 ---
 name: reliable-event-processing
 description: Use when designing, reviewing, or migrating reliable asynchronous event and batch workflows using queues, brokers, workers, outboxes, retries, DLQs, provider batches, and consumer callbacks. Use when changing delivery guarantees, producer execution boundaries, idempotency, transactionality, relay recovery, event-driven realtime behavior, or high-volume LLM inference with durable resume and usage limits.
-version: 1.0.0
-author: Hermes Agent
 license: MIT
-metadata:
-  hermes:
-    tags: [events, queues, outbox, retries, idempotency, durability]
-    related_skills: [spec-drilldown, fail-closed-automation, human-gated-worker-automation]
 ---
 
 # Reliable Event Processing
