@@ -1,30 +1,30 @@
-# Ranked research workflow reference
+# Ranked research workflowの例
 
-This reference captures a reusable shape discovered while designing a ranked-data automation. It is deliberately repository-agnostic; replace names and times for each project.
+このreferenceは、ranked-data automationを設計するときに得られた再利用可能な構成をまとめたものです。特定repositoryには依存しません。各projectに合わせて名称や時刻を置き換えてください。
 
 ## Sequence
 
-1. A Worker refreshes the authoritative ranking snapshot after the daily source cutoff.
-2. A morning agent job calls `prepare` for a bounded top-N set from the latest snapshot.
-3. The Worker fetches external source data, reads current records, computes explicit formulas, and persists a run snapshot.
-4. The agent interprets facts into field-level structured decisions and stores a separate recommendation/proposal record.
-5. The chat adapter receives before/after/source/confidence and awaits a human decision in a continuable thread.
-6. The agent calls `apply` with the exact run ID, proposal hash, and confirmed entity set.
-7. The Worker validates and applies each entity in its own transaction, recording per-entity success/failure.
+1. Workerがdaily source cutoff後にauthoritative ranking snapshotを更新する。
+2. 朝のagent jobが最新snapshotからboundedなtop-N setを対象に `prepare` を呼ぶ。
+3. Workerがexternal source dataを取得し、現在のrecordを読み、明示的なformulaを計算してrun snapshotを永続化する。
+4. agentが事実をfield単位のstructured decisionへ解釈し、別のrecommendation/proposal recordとして保存する。
+5. chat adapterがbefore/after/source/confidenceを受け取り、会話継続可能なthreadで人間のdecisionを待つ。
+6. agentが正確なrun ID、proposal hash、confirmed entity setを指定して `apply` を呼ぶ。
+7. Workerがvalidation後、entityごとに独立したtransactionでapplyし、entity単位のsuccess/failureを記録する。
 
-## Key decisions to preserve
+## 維持すべき重要な判断
 
-- Human review means confidence is evidence, not an automatic threshold. Uncertainty should still be explicit as `skip` plus a reason.
-- Existing values may be overwritten only by valid, explicitly approved fresh values. Failed retrieval and skipped fields do not become empty strings.
-- Recommendation state belongs in a dedicated table when it is not the same concept as the canonical research/value record.
-- Apply must reject stale, expired, hash-mismatched, unauthenticated, or out-of-scope proposals.
-- Entity-level partial success must be represented in the run result; do not accidentally implement one large all-or-nothing transaction.
+- human reviewを行う場合、confidenceは判断材料であり、自動thresholdではない。不確実性は理由付きの `skip` として明示する。
+- 既存値をoverwriteしてよいのは、validかつ明示的に承認されたfresh valueだけである。取得失敗やskipされたfieldをempty stringへ変換しない。
+- recommendation stateがcanonical research/value recordと別概念なら、専用tableへ保存する。
+- applyはstale、expired、hash mismatch、unauthenticated、out-of-scopeなproposalをrejectする。
+- entity単位のpartial successはrun resultへ表現する。誤って1つの大きなall-or-nothing transactionにしない。
 
 ## Review questions
 
-- Does the existing upsert/PUT semantics erase omitted fields?
-- Is the recommendation table auditable independently from the canonical values?
-- Can a duplicate apply be recognized without relying on chat text?
-- Does the morning job consume a known snapshot generation, rather than assuming the refresh finished?
-- Are the scheduler timezone and UTC expression verified from the scheduler documentation?
-- Does the human confirmation identify the exact entities, not merely the run as a whole?
+- 既存のupsert/PUT semanticsはomitted fieldを消去しないか。
+- recommendation tableをcanonical valueとは独立してauditできるか。
+- chat textに依存せずduplicate applyを識別できるか。
+- 朝のjobはrefresh完了を推測するのではなく、既知のsnapshot generationを利用しているか。
+- schedulerのtimezoneとUTC expressionをscheduler documentationから確認しているか。
+- human confirmationはrun全体だけでなく、正確なentityを特定しているか。
