@@ -1,158 +1,158 @@
 ---
 name: human-gated-worker-automation
-description: Use when designing an agent-orchestrated automation that gathers data in a Worker/API, asks a human to review proposed updates in a chat interface, and applies confirmed changes to durable storage. Covers prepare-confirm-apply APIs, advisory confidence, entity-level partial success, idempotency, snapshots, and model/Worker responsibility boundaries.
+description: AgentがWorker/APIから情報を取得し、更新案を人間に確認してもらい、承認された変更だけを永続化する自動化を設計するときに使う。prepare-confirm-apply API、confidenceの扱い、entity単位の部分成功、冪等性、snapshot、modelとWorkerの責務境界を扱う。
 license: MIT
 ---
 
 # Human-gated Worker Automation
 
-## Trigger
+## 発火条件
 
-Use this skill when a task combines:
+次の要素を組み合わせるtaskでこのskillを使います。
 
-- a scheduled LLM agent or chat workflow;
-- one or more Worker/serverless APIs that own data retrieval and persistence;
-- model-generated semantic judgments such as recommendation, direction, classification, or prioritization;
-- human review before side effects; and
-- updates to existing records where stale or partial data could destroy valid state.
+- scheduled LLM agentやchat workflow
+- data取得と永続化を担当するWorker/serverless API
+- recommendation、direction、classification、prioritizationなど、modelによる意味的な判断
+- side effect実行前の人間レビュー
+- staleまたはpartialなdataによって既存の正しい値を破壊する可能性があるrecord更新
 
-This is a class-level design skill. It is not limited to a particular repository, asset type, chat platform, or model provider.
+これは特定のrepository、asset type、chat platform、model providerに限定されない、設計パターンとしてのskillです。
 
-## Core boundary
+## 基本となる責務境界
 
-Keep the durable domain contract in the Worker/API and keep conversational orchestration in the agent or equivalent runtime:
+durableなdomain contractはWorker/APIに置き、会話上のorchestrationはagentまたは同等のruntimeに置きます。
 
-| Responsibility | Worker/API | Agent/model/chat |
+| 責務 | Worker/API | Agent/model/chat |
 | --- | --- | --- |
-| Candidate selection from authoritative data | Yes | No |
-| External source retrieval and source timestamps | Yes | No |
-| Deterministic calculations with explicit formulas | Yes | No |
-| Durable run/proposal state | Yes | No |
-| Input schema and value validation | Yes | No |
-| Semantic interpretation and recommendation | No, validate only | Yes |
-| Human-facing explanation and confirmation | No | Yes |
-| Apply request orchestration | Validate and persist | Initiate after confirmation |
+| authoritative dataからのcandidate選定 | Yes | No |
+| external source取得とsource timestamp管理 | Yes | No |
+| 明示されたformulaによるdeterministic calculation | Yes | No |
+| durableなrun/proposal state | Yes | No |
+| input schemaとvalue validation | Yes | No |
+| semantic interpretationとrecommendation | No、validationのみ | Yes |
+| 人間向けの説明とconfirmation | No | Yes |
+| apply requestのorchestration | validateしてpersist | confirmation後に開始 |
 
-Do not give the agent direct database access when the Worker API can enforce validation, authentication, idempotency, and audit policy.
+Worker APIでvalidation、authentication、idempotency、audit policyを強制できるなら、agentにdatabaseへの直接accessを与えないでください。
 
-## Required lifecycle: prepare → confirm → apply
+## 必須lifecycle: prepare → confirm → apply
 
 1. **Prepare**
-   - Select the bounded candidate set from a named snapshot/version.
-   - Read current values and fetch source data in the Worker.
-   - Compute only unambiguous formulas in the Worker.
-   - Persist a run/proposal snapshot before asking the model to reason over it.
-   - Return a stable `runId`, `proposalHash`, `expiresAt`, source metadata, current values, and model inputs.
+   - 名前付きsnapshot/versionからboundedなcandidate setを選ぶ。
+   - Workerで現在値を読み、source dataを取得する。
+   - 曖昧さのないformulaだけをWorkerで計算する。
+   - modelにreasoningさせる前にrun/proposal snapshotを永続化する。
+   - stableな `runId`、`proposalHash`、`expiresAt`、source metadata、現在値、model inputを返す。
 
 2. **Model decision**
-   - Require structured JSON, not free-form text as the write contract.
-   - Include field-level `action` (`update`/`skip`), proposed value, reason, and confidence where useful.
-   - Treat model output as untrusted input: validate it at the Worker boundary.
-   - A model's uncertainty must be explicit (`skip` plus reason), not represented by empty strings or guessed defaults.
+   - write contractとしてfree-form textではなくstructured JSONを要求する。
+   - 必要に応じてfield単位の `action`（`update` / `skip`）、proposed value、reason、confidenceを含める。
+   - model outputはuntrusted inputとして扱い、Worker boundaryでvalidateする。
+   - modelの不確実性は、empty stringや推測値ではなく、理由付きの `skip` として明示する。
 
 3. **Confirm**
-   - Present before/after, source, reason, and confidence to the human in a continuable chat thread/session.
-   - Store the proposed recommendation in a dedicated recommendation/proposal table rather than mixing it into the canonical research/value table.
-   - If a human reviews the proposal before apply, confidence is advisory evidence, not an automatic rejection threshold unless the user explicitly requires one.
-   - Confirmation must identify the exact `runId`, proposal hash, and entity set being approved.
+   - before/after、source、reason、confidenceを、会話を継続できるchat thread/sessionで人間に提示する。
+   - proposal/recommendationはcanonicalなresearch/value tableへ混ぜず、専用のrecommendation/proposal tableへ保存する。
+   - apply前に人間がreviewする場合、confidenceは参考情報であり、ユーザーが明示的に要求しない限り自動reject thresholdにはしない。
+   - confirmationでは、承認対象となる正確な `runId`、proposal hash、entity setを特定する。
 
 4. **Apply**
-   - Require authentication, valid run state, non-expired proposal, matching hash, allowed entity IDs, and schema-valid decisions.
-   - Apply only fields explicitly marked `update`; `skip`, rejected, missing, invalid, or unavailable fields remain unchanged.
-   - Preserve existing values when retrieval or reasoning fails. Never turn unavailable data into an empty-string overwrite.
-   - Make the operation idempotent by run/proposal identity.
+   - authentication、正しいrun state、未expireのproposal、hash一致、許可されたentity ID、schema-validなdecisionを必須にする。
+   - `update` と明示されたfieldだけを更新する。`skip`、rejected、missing、invalid、unavailableなfieldは変更しない。
+   - data取得やreasoningに失敗した場合は既存値を維持する。取得不能をempty string overwriteへ変換しない。
+   - run/proposal identityによってoperationを冪等にする。
 
 ## Data model
 
-At minimum, persist:
+最低限、次を永続化します。
 
-- run/proposal identity and status (`prepared`, `confirmed`, `applied`, `expired`, `failed`);
-- source snapshot timestamp and source references;
-- before values and proposed values;
-- proposal hash and expiration;
-- model decision JSON, reason, and confidence;
-- human decision JSON and confirmation timestamp;
-- per-entity apply status and error;
-- applied timestamp and run identity.
+- run/proposal identityとstatus（`prepared`、`confirmed`、`applied`、`expired`、`failed`）
+- source snapshot timestampとsource reference
+- before valueとproposed value
+- proposal hashとexpiration
+- model decision JSON、reason、confidence
+- human decision JSONとconfirmation timestamp
+- entity単位のapply statusとerror
+- applied timestampとrun identity
 
-Keep semantic recommendation state in a dedicated table when it is conceptually different from raw research metrics or canonical values. Do not store `up/down/stay` in a numeric/text metric column merely because that column already exists.
+semantic recommendation stateがraw research metricやcanonical valueと別概念なら、専用tableへ保存してください。既存columnがあるという理由だけで、`up/down/stay` をnumeric/text metric columnへ保存しないでください。
 
-## Partial failure and transaction scope
+## Partial failureとtransaction scope
 
-Choose the transaction boundary explicitly. When the requirement is entity-level partial success:
+transaction boundaryを明示的に決めます。entity単位のpartial successが要件なら、次を満たします。
 
-- process each entity in its own transaction;
-- record success/failure per entity;
-- continue with other entities after one entity fails;
-- make retries safe for already-applied entities;
-- report both successful and failed entity IDs.
+- entityごとに独立したtransactionで処理する。
+- entityごとのsuccess/failureを記録する。
+- 1 entityが失敗しても他entityを継続する。
+- すでにapply済みのentityへ安全にretryできるようにする。
+- 成功したentity IDと失敗したentity IDの両方をreportする。
 
-Do not claim all-or-nothing semantics when the user selected entity-level application.
+entity単位の適用を選んだのに、all-or-nothing semanticsとして説明しないでください。
 
-## Scheduling and snapshot ordering
+## Schedulingとsnapshot ordering
 
-When a morning prepare consumes a daily ranking or catalog updated later in the day:
+朝のprepareが、その日の後半に更新されるdaily rankingやcatalogを利用する場合は次を守ります。
 
-- schedule the source snapshot refresh after the user's stated cutoff;
-- schedule prepare after the snapshot is expected to be complete, commonly on the next morning;
-- document the timezone and convert to the platform's actual cron timezone before writing expressions;
-- avoid scheduling the source refresh and prepare at the same instant;
-- include the snapshot's `fetchedAt` in the run and user-facing report.
+- source snapshot refreshは、ユーザーが定めたdaily cutoffより後にscheduleする。
+- prepareはsnapshot完成後、一般には翌朝にscheduleする。
+- timezoneを明記し、cron expressionを書く前にplatformが実際に使うtimezoneへ変換する。
+- source refreshとprepareを同時刻にしない。
+- runとuser-facing reportにsnapshotの `fetchedAt` を含める。
 
-If the source refresh currently shares a schedule with a new prepare flow, change the schedule or add an explicit generation/version barrier rather than relying on timing luck.
+既存のsource refreshと新しいprepare flowが同じscheduleを共有している場合は、時刻を変更するか、明示的なgeneration/version barrierを追加してください。偶然のtimingに依存しないでください。
 
-## Scheduled agent behavior and chat delivery
+## Scheduled agentの挙動とchat delivery
 
-For a job that must receive a human reply, use a normal model-driven continuable job and a dedicated origin thread/session. Do not use script-only execution for semantic judgment or confirmation: a script-only job has no conversational model turn.
+人間からのreplyを受け取る必要があるjobでは、model-drivenで会話継続可能なjobと専用のorigin thread/sessionを使います。semantic judgmentやconfirmationをscript-only executionで済ませないでください。script-only jobには会話上のmodel turnがありません。
 
-The job prompt must be self-contained because scheduled jobs run in fresh agent sessions. It must specify:
+scheduled jobはfreshなagent sessionで実行される可能性があるため、job promptは自己完結させます。少なくとも次を含めます。
 
-- Worker API endpoints and authentication mechanism without exposing secret values;
-- the prepare/decision/confirm/apply sequence;
-- the structured decision schema;
-- what must never be overwritten;
-- how to identify the approved run;
-- how to report partial success and failures.
+- secret value自体を露出しないWorker API endpointとauthentication mechanism
+- prepare/decision/confirm/apply sequence
+- structured decision schema
+- 絶対にoverwriteしてはいけないもの
+- approved runの識別方法
+- partial successとfailureのreport方法
 
-Pin the model/provider for unattended jobs when the runtime supports per-job pinning, and keep delivery scoped to the origin chat/thread. Never make a scheduled job recursively create more scheduled jobs.
+runtimeがjob単位のmodel/provider pinをサポートする場合はunattended jobでpinし、delivery先はorigin chat/threadへ限定します。scheduled jobから再帰的にscheduled jobを作らせないでください。
 
-## Decision endpoint adapter and chat delivery
+## Decision endpoint adapterとchat delivery
 
-When the Worker contract separates entity-level recommendation state from field-level actions, construct one decision object per entity. Represent each `updatableFields` entry in a `fields` record and set its nested action explicitly to `skip` with a reason; do not send a flat list of `{field, action}` objects unless the endpoint contract explicitly requires that shape. Do not include proposed values for skipped fields. Validate the live response contract before posting candidate messages. The reusable schema-probing and adapter details are documented in [`references/decision-endpoint-adapter.md`](references/decision-endpoint-adapter.md).
+Worker contractがentity単位のrecommendation stateとfield単位のactionを分離している場合は、entityごとに1つのdecision objectを構築します。各 `updatableFields` を `fields` recordで表し、そのnested actionを理由付きの `skip` として明示します。endpoint contractが明示的に要求しない限り、`{field, action}` のflat listを送らないでください。skipするfieldにproposed valueを含めないでください。candidate messageをpostする前にlive response contractをvalidateします。再利用可能なschema probeとadapterの詳細は [`references/decision-endpoint-adapter.md`](references/decision-endpoint-adapter.md) を参照してください。
 
-For runtimes that suppress duplicate-target posts, use the platform adapter's documented separate-send mechanism when an additional exact candidate message is required. Verify the returned message ID, keep the final report separate, and do not alter the candidate body.
+runtimeが同一targetへのduplicate postを抑止する場合、追加で完全一致のcandidate messageを送る必要があるなら、platform adapterが提供するdocumented separate-send mechanismを使います。返されたmessage IDを確認し、final reportとは分離し、candidate bodyを変更しないでください。
 
-## Common pitfalls
+## よくある問題
 
-- Reusing a full-replacement PUT/POST for field-level skip semantics.
-- Sending only `code` or partial objects to an upsert that normalizes omitted fields to `''`.
-- Letting the model choose candidates or fetch authoritative data, causing non-reproducible scope.
-- Treating confidence as a substitute for human confirmation when the user explicitly wants a review step.
-- Storing recommendations in the canonical metrics table, making audit and rollback ambiguous.
-- Applying all entities in one transaction after the user selected entity-level continuation.
-- Applying a proposal by `code` alone without a run hash, expiry, or snapshot identity.
-- Assuming cron expressions use local time without checking the scheduler's timezone.
-- Claiming a review passed based only on a child process exit code; verify the actual model identity, structured verdict, and target revision.
+- field単位のskip semanticsが必要なのにfull-replacement PUT/POSTを再利用する。
+- omitted fieldを `''` にnormalizeするupsertへ、`code` だけまたはpartial objectだけを送る。
+- modelにcandidate選択やauthoritative data取得を任せ、scopeが再現不能になる。
+- 人間reviewが要件なのにconfidenceをconfirmationの代わりに使う。
+- recommendationをcanonical metrics tableへ保存し、auditやrollbackを曖昧にする。
+- entity単位の継続を選んだのに全entityを1 transactionでapplyする。
+- run hash、expiry、snapshot identityなしで `code` だけを使ってproposalをapplyする。
+- schedulerのtimezoneを確認せずcron expressionがlocal timeだと仮定する。
+- child processのexit codeだけでreview成功と判断する。実際のmodel identity、structured verdict、target revisionを確認する。
 
-## Verification checklist
+## 検証checklist
 
-Before implementation approval, verify:
+実装承認前に次を確認します。
 
-- [ ] Candidate selection is deterministic and bounded.
-- [ ] Source values, source timestamps, and snapshot identity are persisted.
-- [ ] Prepare and apply are separate API operations.
-- [ ] Proposal state, hash, expiry, and idempotency are defined.
-- [ ] Structured model output is schema-validated.
-- [ ] Human confirmation is required before side effects.
-- [ ] `skip` means no change, never empty-string overwrite.
-- [ ] Recommendation state is separated from canonical metrics where appropriate.
-- [ ] Transaction scope matches the user's partial-failure decision.
-- [ ] Authentication is consistent on all write paths.
-- [ ] Cron timezone and ordering are verified.
-- [ ] Tests cover stale proposals, duplicate apply, invalid decisions, source failure, one-entity failure, and retry after partial success.
+- [ ] candidate selectionがdeterministicかつboundedである。
+- [ ] source value、source timestamp、snapshot identityが永続化される。
+- [ ] prepareとapplyが別API operationになっている。
+- [ ] proposal state、hash、expiry、idempotencyが定義されている。
+- [ ] structured model outputがschema validationされる。
+- [ ] side effect前にhuman confirmationが必須である。
+- [ ] `skip` が「変更なし」を意味し、empty-string overwriteにならない。
+- [ ] 必要な場合、recommendation stateがcanonical metricsから分離されている。
+- [ ] transaction scopeがpartial-failure要件と一致している。
+- [ ] すべてのwrite pathでauthenticationが一貫している。
+- [ ] cron timezoneとorderingが確認されている。
+- [ ] stale proposal、duplicate apply、invalid decision、source failure、1 entity failure、partial success後のretryをtestしている。
 
 ## References
 
-- See `references/portfolio-research-run-example.md` for a condensed example of a daily ranked-data workflow with a human-gated apply phase.
-- For specification-first questioning and adversarial review, use the existing `spec-drilldown` skill.
-- For editing existing scheduled jobs, use the applicable runtime/job-maintenance skill; this skill supplies the domain design contract, not the job-editing procedure.
+- 人間承認付きdaily ranked-data workflowの短い例は `references/portfolio-research-run-example.md` を参照する。
+- specification-firstの質問とadversarial reviewには既存の `spec-drilldown` skillを使う。
+- 既存scheduled jobの編集には、そのruntime向けのjob-maintenance機能を使う。このskillはdomain design contractを定義し、runtime固有のjob編集手順は定義しない。
