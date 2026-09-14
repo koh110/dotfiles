@@ -1,51 +1,51 @@
-# Synchronous DB + External API Consistency
+# Synchronous DB + External API consistency
 
-Use this reference when one HTTP request changes both a local database and a remote system such as an identity provider.
+1つのHTTP requestでlocal databaseとidentity providerなどのremote systemの両方を変更するときに使うreferenceです。
 
-## Why compensation alone is insufficient
+## Compensationだけでは不十分な理由
 
-A sequence such as `lock row → update DB transaction → call remote API → commit DB → return success` has at least two ambiguous boundaries:
+`rowをlock → DB transactionを更新 → remote APIを呼ぶ → DBをcommit → successを返す` というsequenceには、少なくとも2つのambiguous boundaryがあります。
 
-1. The remote API may apply the mutation and then the request context may be cancelled or the response may be lost. An error return does not prove the remote mutation did not happen.
-2. `COMMIT` may reach the database and succeed while the client loses the acknowledgement. A commit error does not always prove rollback.
+1. remote APIがmutationを適用した後にrequest contextがcancelされたりresponseが失われたりする可能性がある。errorが返ったからといってremote mutationが行われなかった証明にはならない。
+2. `COMMIT` がdatabaseへ到達して成功していても、clientがacknowledgmentを受け取れない場合がある。commit errorは必ずしもrollbackを意味しない。
 
-Blindly restoring the remote value on every commit error can invert the inconsistency: the DB may contain the new value while the remote system is restored to the old value. A request-context-bound compensation call is weaker still because it may fail immediately after cancellation.
+commit errorのたびにremote valueをblindly元へ戻すと、逆方向のinconsistencyを作る可能性があります。DBにはnew valueが入っているのにremote systemだけold valueへ戻るためです。request contextに紐づいたcompensation callはさらに弱く、request cancellation直後に即座に失敗する可能性があります。
 
-## Minimum safe contract
+## 最低限必要なsafe contract
 
-- Do not send a success response until the required local commit is known successful.
-- Bound row-lock and external-call duration explicitly.
-- If best-effort compensation is used, run it with a new bounded context detached from request cancellation (`context.WithoutCancel` plus `context.WithTimeout` in Go).
-- Treat external response ambiguity and DB commit ambiguity as distinct durable states, not generic failures.
-- Persist an operation ID and enough old/new state to reconcile without trusting stale authentication/session context.
-- Provide a durable reconciliation path that reads actual local and remote state, chooses the documented source of truth, retries idempotently, and reaches a terminal state or operator-visible dead-letter state.
-- Never log raw credentials or tokens; minimize PII in reconciliation logs. Log operation IDs, state, age, attempt count, and classified failure.
+- 必要なlocal commitの成功が確認できるまでsuccess responseを返さない。
+- row lockとexternal callのdurationを明示的にboundedにする。
+- best-effort compensationを使う場合は、request cancellationから切り離した新しいbounded contextで実行する。Goなら `context.WithoutCancel` + `context.WithTimeout` を使う。
+- external response ambiguityとDB commit ambiguityをgeneric failureではなく、別々のdurable stateとして扱う。
+- operation IDとold/new stateを十分に永続化し、staleなauthentication/session contextを信頼せずreconcileできるようにする。
+- 実際のlocal/remote stateを読み、documented source of truthを選び、idempotentにretryし、terminal stateまたはoperator-visibleなdead-letter stateへ到達するdurable reconciliation pathを用意する。
+- raw credentialやtokenをlogしない。reconciliation log中のPIIを最小化する。operation ID、state、age、attempt count、classified failureをlogする。
 
 ## Design choices
 
 ### Durable synchronous saga
 
-Create the durable operation record before crossing the first non-atomic boundary. Perform the user-visible path synchronously, then mark the operation complete. Ambiguous outcomes remain pending for a worker or scheduled reconciler. This can preserve a synchronous API while still guaranteeing eventual convergence.
+最初のnon-atomic boundaryを越える前にdurable operation recordを作ります。user-visible pathはsynchronousに実行し、完了後にoperationをcompleteへmarkします。ambiguous outcomeはpendingのままworkerまたはscheduled reconcilerへ渡します。public APIをsynchronousのまま維持しつつeventual convergenceを保証できます。
 
 ### Transactional outbox / asynchronous operation
 
-Atomically write the business mutation and an outbox event, commit, then let a relay/worker call the remote API. Return `202 Accepted` when the public contract is asynchronous, or expose operation status. This gives the clearest durability boundary but changes product/API semantics.
+business mutationとoutbox eventをatomicに書いてcommitし、その後relay/workerがremote APIを呼びます。public contractがasynchronousなら `202 Accepted` を返すかoperation statusを公開します。durability boundaryは最も明確ですが、product/API semanticsが変わります。
 
 ### Best-effort compensation only
 
-Acceptable only when the product owner explicitly accepts residual inconsistency and the review gate records that exception. It cannot be described as a zero-inconsistency guarantee.
+product ownerがresidual inconsistencyを明示的に受け入れ、review gateでそのexceptionを記録した場合だけ許容します。zero-inconsistency guaranteeとして説明することはできません。
 
-## Required tests
+## 必須test
 
-- Remote success followed by local commit failure.
-- Cancelled request context before compensation; detached bounded compensation still executes.
-- Remote mutation applied but response reported as error/timeout.
-- Database commit acknowledgement lost/unknown.
-- Compensation failure and subsequent durable reconciliation.
-- Same-identity concurrent updates under row locking/idempotency.
-- Reconciler retries, deduplication, terminal failure visibility, and PII-safe logs.
-- Success response is emitted only after the documented consistency boundary.
+- remote success後にlocal commitが失敗する。
+- compensation前にrequest contextがcancelされるが、detached bounded compensationは実行される。
+- remote mutationは適用されたがresponseがerror/timeoutとして返る。
+- database commit acknowledgmentがlost/unknownになる。
+- compensationが失敗し、その後durable reconciliationが実行される。
+- 同じidentityに対するconcurrent updateをrow locking/idempotency下で処理する。
+- reconcilerのretry、deduplication、terminal failure visibility、PII-safe logを確認する。
+- documented consistency boundaryを越えた後だけsuccess responseが返される。
 
-## Review pitfall
+## Review時の注意
 
-Do not turn a review finding into an implicit outbox/worker architecture change. A new durable execution boundary requires a specification, failure-state model, operational contract, and independent adversarial review before implementation.
+review findingを暗黙のoutbox/worker architecture変更へ変換しないでください。新しいdurable execution boundaryを導入する場合は、実装前にspecification、failure-state model、operational contract、独立したadversarial reviewが必要です。
