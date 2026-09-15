@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+case "$#" in
+  0) ;;
+  1)
+    case "$1" in
+      -h|--help)
+        printf '%s\n' 'Usage: refresh-default-branches'
+        printf '%s\n' 'Refresh repository default branches under $HOME/dev.'
+        printf '%s\n' 'Set GIT_REPOSITORIES_ROOT to override the repository root.'
+        exit 0
+        ;;
+      *)
+        printf 'error: unexpected argument: %s\n' "$1" >&2
+        printf '%s\n' 'Usage: refresh-default-branches' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    printf 'error: unexpected arguments: %s\n' "$*" >&2
+    printf '%s\n' 'Usage: refresh-default-branches' >&2
+    exit 2
+    ;;
+esac
+
+exec node "$root/lib/refresh-default-branches.mjs"
