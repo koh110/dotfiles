@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: '実装コードの独立レビュー、品質ゲート、指摘の判定と修正後closureを、runtimeやproviderに依存せず実行する。'
-version: 1.0.0
+version: 1.1.0
 license: MIT
 ---
 
@@ -41,8 +41,9 @@ qualified reviewerが利用できない場合はfail-closedとし、`Pending: qu
 2. 追加行を対象にsecret、shell injection、eval/exec、unsafe deserialization、SQL injection、debug code等をscanする
 3. 変更前baselineと比較して、新規test/lint/typecheck/build failureを確認する
 4. 変更意図、エラー処理、入力境界、NULL/enum、transaction、並行性、認証認可、外部I/O、性能、テスト不足を確認する
-5. reviewerの実際のprovider/modelまたは能力tier、対象revision、Verdictを記録する
-6. review後に変更があれば、以前のtest/review evidenceを無効化し、最終revisionに対して全gateを再実行する
+5. 新規dependency、abstraction、wrapper、service、config、compatibility layerについて、既存コード・標準機能・platform native機能・導入済みdependencyで代替できないか確認し、不要なowned complexityを指摘する
+6. reviewerの実際のprovider/modelまたは能力tier、対象revision、Verdictを記録する
+7. review後に変更があれば、以前のtest/review evidenceを無効化し、最終revisionに対して全gateを再実行する
 
 ## Reviewer Inputs
 
@@ -109,6 +110,7 @@ Blocking/Majorを修正した場合:
 - [ ] 対象revisionとbaseをauthoritative metadataから確定した
 - [ ] static security scanを実行した
 - [ ] baselineとの差分を含むtest/lint/typecheck/build結果を確認した
+- [ ] 新規dependency / abstraction / wrapper / service / configに不要なowned complexityがないか確認した
 - [ ] 独立reviewerの実model/tier、対象revision、構造化Verdictを記録した
 - [ ] Blocking/Majorが0件である
 - [ ] reviewer指摘をcanonical requirementに照らして判定した
