@@ -62,7 +62,7 @@ WSL は Nix 評価時には自動判定できないため明示します。
 portableZsh.platform = "wsl";
 ```
 
-Home Manager 側も `builtins.readFile` と `home.file.<name>.text` で同じ fragment を同じ順序に連結します。
+Home Manager 側も `builtins.readFile` と `home.file.<name>.text` で同じ fragment を同じ順序に連結します。`programs.zsh` 側で同じ `.zshrc` / `.zshenv` を生成する設定とは併用しません。
 
 Nix を外す場合も、raw `.zsh` fragment を `deploy.ts` や単純な `cat` で連結すればよく、設定内容の変換は不要です。
 
