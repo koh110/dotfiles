@@ -1,6 +1,6 @@
 # zsh layered deploy sample
 
-`npx tsx deploy.ts --zsh` の `.zshrc` 配置を、設定内容を生成せず raw zsh file のレイヤーとして扱うサンプルです。
+`node deploy.ts --zsh` の `.zshrc` 配置を、設定内容を生成せず raw zsh file のレイヤーとして扱うサンプルです。TypeScript の実行には Node.js 組み込みの strip-types を使い、`tsx` / `ts-node` は使いません。
 
 適用順は次の通りです。
 
