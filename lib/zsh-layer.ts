@@ -1,5 +1,5 @@
 import { copyFile, constants, mkdir, rm } from 'node:fs/promises'
-import { hostname, homedir, platform } from 'node:os'
+import { hostname, platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isWSL } from './wsl.ts'
@@ -7,7 +7,6 @@ import { isWSL } from './wsl.ts'
 const REPO_DIR = fileURLToPath(new URL('..', import.meta.url))
 const TEMPLATE_DIR = join(REPO_DIR, 'templates', 'files')
 const ENTRYPOINT = join(REPO_DIR, 'layers', 'zsh', 'entrypoint.zshrc')
-const DEPLOY_DIR = join(homedir(), '.config', 'dotfiles', 'zsh')
 
 function detectOsLayer() {
   if (platform() === 'darwin') {
@@ -47,13 +46,15 @@ async function copyOptional(source: string, target: string) {
 export async function deployLayeredZshrc(targetPath: string) {
   const os = detectOsLayer()
   const host = detectHostLayer()
+  const targetHome = dirname(targetPath)
+  const deployDir = join(targetHome, '.config', 'dotfiles', 'zsh')
 
-  await mkdir(DEPLOY_DIR, { recursive: true })
+  await mkdir(deployDir, { recursive: true })
 
   // 現行rootの .zshrc を common の正本としてそのまま利用する。
   await copyFile(
     join(REPO_DIR, '.zshrc'),
-    join(DEPLOY_DIR, '10-common.zsh'),
+    join(deployDir, '10-common.zsh'),
     constants.COPYFILE_FICLONE
   )
 
@@ -61,21 +62,21 @@ export async function deployLayeredZshrc(targetPath: string) {
   // 設定内容をNixやTypeScriptへ移さず、最終的には files/<os> 等へ移動できる。
   await copyOptional(
     join(TEMPLATE_DIR, os, '.zshrc'),
-    join(DEPLOY_DIR, '20-os.zsh')
+    join(deployDir, '20-os.zsh')
   )
 
   if (isWSL()) {
     await copyOptional(
       join(TEMPLATE_DIR, 'wsl', '.zshrc'),
-      join(DEPLOY_DIR, '30-wsl.zsh')
+      join(deployDir, '30-wsl.zsh')
     )
   } else {
-    await rm(join(DEPLOY_DIR, '30-wsl.zsh'), { force: true })
+    await rm(join(deployDir, '30-wsl.zsh'), { force: true })
   }
 
   await copyOptional(
     join(REPO_DIR, 'hosts', host, '.zshrc'),
-    join(DEPLOY_DIR, '40-host.zsh')
+    join(deployDir, '40-host.zsh')
   )
 
   // ~/.zshrc 自体は固定の薄いentrypoint。各設定はraw fileのまま保持する。
