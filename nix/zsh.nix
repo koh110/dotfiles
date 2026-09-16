@@ -15,18 +15,20 @@ let
   readOptional = path:
     if builtins.pathExists path then builtins.readFile path else "";
 
-  hostFragment =
-    if cfg.host == null then ""
-    else readOptional (root + "/hosts/${cfg.host}/zsh.zsh");
+  compose = kind:
+    let
+      hostFragment =
+        if cfg.host == null then ""
+        else readOptional (root + "/hosts/${cfg.host}/zsh/${kind}.zsh");
 
-  fragments = [
-    (builtins.readFile (root + "/.zshrc"))
-    (readOptional (root + "/zsh/${os}.zsh"))
-  ]
-  ++ lib.optional (platform == "wsl") (readOptional (root + "/zsh/wsl.zsh"))
-  ++ lib.optional (hostFragment != "") hostFragment;
-
-  zshrc = lib.concatStringsSep "\n\n" (builtins.filter (fragment: fragment != "") fragments);
+      fragments = [
+        (builtins.readFile (root + "/zsh/${kind}/common.zsh"))
+        (readOptional (root + "/zsh/${kind}/${os}.zsh"))
+      ]
+      ++ lib.optional (platform == "wsl") (readOptional (root + "/zsh/${kind}/wsl.zsh"))
+      ++ lib.optional (hostFragment != "") hostFragment;
+    in
+      lib.concatStringsSep "\n\n" (builtins.filter (fragment: fragment != "") fragments) + "\n";
 in
 {
   options.portableZsh = {
@@ -52,6 +54,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    home.file.".zshrc".text = zshrc + "\n";
+    home.file.".zshrc".text = compose "rc";
+    home.file.".zshenv".text = compose "env";
   };
 }
