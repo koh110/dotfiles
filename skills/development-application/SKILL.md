@@ -17,6 +17,25 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - アプリケーション・新機能の作成依頼で仕様が曖昧な場合、実装や plan 作成に着手する前に `spec-drilldown` skill を実行し、仕様を磨き込んでから実装する
 - 承認された仕様書なしに新規作成の実装を始めない（明確な bugfix や仕様の自由度がない作業は除く）
 
+## Implementation Selection
+
+実装方法を決める前に、以下を上から順に検討し、要求を正しく満たす最初の選択肢を採用する。下位の選択肢へ進むのは、上位の選択肢では要求を満たせない場合だけとする。
+
+1. **変更自体が必要か**
+   - speculativeな将来要件、依頼されていない拡張性、想定だけの互換性のための実装は行わない
+   - 承認済みの仕様・acceptance criteria・安全性要件を「不要」と判断して削らない
+2. **既存コード・型・patternで適切に表現できるか**
+   - 新しいhelper / util / abstraction / 共通型を作る前にrepo内を検索する
+   - 既存実装が現在の設計として適切なら再利用する。ただし、既存という理由だけで不適切な設計や互換レイヤーを延命しない
+3. **言語の標準機能・標準ライブラリで解決できるか**
+4. **platform / framework / database等のnative機能で解決できるか**
+5. **既に導入済みのdependencyで解決できるか**
+6. **それでも必要なら、要求を満たす最小の新規実装を行う**
+
+- 新しいdependency、abstraction、wrapper、service、config、compatibility layerを追加する場合は、上位の選択肢で解決できない理由を説明できること
+- コード行数の少なさ自体を目的にしない。可読性、保守性、型安全性、既存の言語別skillのstyleを優先する
+- この順序を理由に、必要なvalidation、authorization、error handling、transaction、data integrity、accessibility等を削らない
+
 ## General Guidelines
 
 - **明示的な指定がない限り、PRのtarget/base branchとの差分を最小にして着手する**。PR target/base branchが明示されている場合はそれを優先し、未指定の場合だけ`git ls-remote --symref origin HEAD`等のauthoritative remote metadataからdefault branchを解決する。通常は`main`、存在しなければ`master`等だが、branch名を推測しない。開始前に目的・受け入れ条件・変更対象を列挙し、各変更が目的達成に必要かを確認する。既存の未マージbranch、作業途中のworktree、関連機能の実装をそのまま土台にしない
@@ -60,13 +79,12 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 ## Design Decision Escalation
 
 - **どちらにも筋が通る設計分岐は単独で決めず、選択肢と影響範囲を提示して確認する**。例: 既存の宣言(型・契約・設定)と実装の実態が食い違っている場合、宣言を実態へ合わせるか実態を宣言へ合わせるかはどちらも成立し得る設計判断であり、確認なしに一方へ倒さない
-- **新しい共有抽象（helper / util / 共通型）を作る前に、既存の同種実装パターンを repo 内で検索する**。既存の型・パターンで表現できる場合はそれに従い、独自の新規抽象を発明しない
 - **観測事実と推論を分離して報告する**。影響（壊れる / drift している等）や原因を主張する前に再現観測で裏取りし、未観測の主張には「推定」と明記する。CLI 出力の欠落は `--json` 等の機械可読形式で裏取りしてから結論する
 
 ## Platform Constraint Guidelines
 
 - クラウド/プラットフォームの制約に当たって回避策を設計する前に、**その制約自体を持たない代替サービス・後継機能がないかを必ず調査する**。制約は「所与の事実」ではなく「そのサービス世代の制約」であることが多い（例: classic EventBridge Rules はスケジュールをデフォルトバスにしか置けないが、後継の EventBridge Scheduler は Universal Target で任意のバス/API へ直接配信できる）
-- **「1回のAPI呼び出しを仲介するだけの Lambda/Functions/コンテナ/スクリプト」を追加する設計は、ネイティブ統合の見落としシグナルとして扱う**。採用前に直接統合の存在を確認し、見つからなかった場合のみグルーコードを採用してその調査結果を設計コメントに残す
+- **「1回のAPI呼び出しを仲介するだけの Lambda/Functions/コンテナ/スクリプト」を追加する場合は、Implementation Selection の native 機能確認を必ず実施する**。直接統合が見つからなかった場合のみグルーコードを採用し、その調査結果を設計コメントに残す
 - 回避策を含む plan をレビューに出すときは、依拠している制約に出典（公式ドキュメント/検証結果）を添える。出典を示せない制約は思い込みの可能性があるため、その場で再調査する
 
 ## Database Schema Design Guidelines
