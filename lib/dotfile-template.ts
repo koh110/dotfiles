@@ -3,7 +3,7 @@ import { platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isWSL } from './wsl.ts'
-import { deployLayeredZshrc } from './zsh-layer.ts'
+import { deployLayeredZsh } from './zsh-layer.ts'
 
 const REPO_DIR = fileURLToPath(new URL('..', import.meta.url))
 const TEMPLATE_DIR = join(REPO_DIR, 'templates', 'files')
@@ -69,10 +69,13 @@ function applyAdditionalLines(base: string, additional: string) {
 }
 
 export async function deployDotfile(path: string, targetPath: string) {
-  // zsh は raw な .zsh 断片を common -> OS -> WSL -> host の順で連結し、
-  // 最終的な ~/.zshrc を1ファイルとして生成する。
   if (path === '.zshrc') {
-    await deployLayeredZshrc(targetPath)
+    await deployLayeredZsh('rc', targetPath)
+    return
+  }
+
+  if (path === '.zshenv') {
+    await deployLayeredZsh('env', targetPath)
     return
   }
 
