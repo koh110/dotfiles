@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
-const entrypoint = path.join(root, 'bin', 'refresh-default-branches')
+const entrypoint = path.join(root, 'bin', 'refresh-default-branches.sh')
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, {
