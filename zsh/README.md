@@ -2,24 +2,48 @@
 
 zsh の設定は Nix DSL や TypeScript に書き換えず、通常の `.zsh` ファイルを正本として保持します。
 
-適用順は次の通りです。
-
 ```text
-.zshrc                  # common
-zsh/<os>.zsh            # linux | macos (optional)
-zsh/wsl.zsh             # WSL only (optional)
-hosts/<host>/zsh.zsh    # host-specific (optional)
+zsh/
+├── rc/
+│   ├── common.zsh
+│   ├── linux.zsh
+│   ├── macos.zsh
+│   └── wsl.zsh
+└── env/
+    ├── common.zsh
+    ├── macos.zsh
+    └── wsl.zsh
+
+hosts/<host>/zsh/
+├── rc.zsh
+└── env.zsh
 ```
 
-`node deploy.ts --zsh` はこれらを順番に連結し、最終的な `~/.zshrc` を1ファイルとして書き出します。実行時に追加ファイルを `source` する構成にはしません。
+`.zshrc` と `.zshenv` はどちらも次の順序で生成します。
 
-host はデフォルトで hostname を使い、必要なら `DOTFILES_HOST` で上書きできます。
+```text
+common -> OS -> WSL -> host
+```
+
+WSL では OS layer として `linux` を適用した後に `wsl` を重ねます。
+
+## deploy.ts
+
+```sh
+node deploy.ts --zsh
+```
+
+`deploy.ts` は fragment を連結して `~/.zshrc` / `~/.zshenv` を直接生成します。生成後のファイルから別の設定 fragment を `source` する構成にはしません。
+
+host は hostname をデフォルトにし、必要なら `DOTFILES_HOST` で上書きできます。
 
 ```sh
 DOTFILES_HOST=llm-server node deploy.ts --zsh
 ```
 
-Home Manager を使う場合は `nix/zsh.nix` を import します。
+## Home Manager
+
+`nix/zsh.nix` を import します。
 
 ```nix
 {
@@ -32,12 +56,14 @@ Home Manager を使う場合は `nix/zsh.nix` を import します。
 }
 ```
 
-WSL は Nix の評価時に自動判定しないため明示します。
+WSL は Nix 評価時には自動判定できないため明示します。
 
 ```nix
 portableZsh.platform = "wsl";
 ```
 
-Home Manager 側も `builtins.readFile` と `home.file.".zshrc".text` を使って同じ順序で連結します。Nix を外す場合も、raw `.zsh` 断片を `deploy.ts` や単純な `cat` で連結すればよく、設定内容の変換は不要です。
+Home Manager 側も `builtins.readFile` と `home.file.<name>.text` で同じ fragment を同じ順序に連結します。
 
-現段階では既存 root `.zshrc` を common として残しています。今後必要ならその中に残る OS 分岐を `zsh/linux.zsh` / `zsh/macos.zsh` へ段階的に移します。
+Nix を外す場合も、raw `.zsh` fragment を `deploy.ts` や単純な `cat` で連結すればよく、設定内容の変換は不要です。
+
+`backup.ts --zsh` は生成済みファイルを正本へ逆流させないため何も保存しません。zsh設定はこのディレクトリ内のfragmentを直接編集します。
