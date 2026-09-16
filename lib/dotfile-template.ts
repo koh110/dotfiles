@@ -69,8 +69,8 @@ function applyAdditionalLines(base: string, additional: string) {
 }
 
 export async function deployDotfile(path: string, targetPath: string) {
-  // zsh は自身の source 機構で raw file を合成できるため、行単位 template 合成ではなく
-  // common -> OS -> WSL -> host のレイヤーを個別配置するサンプルへ移行する。
+  // zsh は raw な .zsh 断片を common -> OS -> WSL -> host の順で連結し、
+  // 最終的な ~/.zshrc を1ファイルとして生成する。
   if (path === '.zshrc') {
     await deployLayeredZshrc(targetPath)
     return
