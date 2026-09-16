@@ -3,6 +3,7 @@ import { platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isWSL } from './wsl.ts'
+import { deployLayeredZshrc } from './zsh-layer.ts'
 
 const REPO_DIR = fileURLToPath(new URL('..', import.meta.url))
 const TEMPLATE_DIR = join(REPO_DIR, 'templates', 'files')
@@ -18,7 +19,6 @@ function detectEnvironment() {
 
   return 'linux'
 }
-
 
 function templateCandidates(path: string) {
   const environment = detectEnvironment()
@@ -69,6 +69,13 @@ function applyAdditionalLines(base: string, additional: string) {
 }
 
 export async function deployDotfile(path: string, targetPath: string) {
+  // zsh は自身の source 機構で raw file を合成できるため、行単位 template 合成ではなく
+  // common -> OS -> WSL -> host のレイヤーを個別配置するサンプルへ移行する。
+  if (path === '.zshrc') {
+    await deployLayeredZshrc(targetPath)
+    return
+  }
+
   const templatePath = await findExistingTemplate(path)
   await mkdir(dirname(targetPath), { recursive: true })
 
