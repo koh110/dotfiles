@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:change-target": "node --test skills/change-target-gate/scripts/change-target-gate.test.mjs"
+    "test:change-target": "node --test skills/change-target-gate/scripts/change-target-gate.test.mjs",
+    "test:refresh-default-branches": "node --test tests/refresh-default-branches.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.14",
