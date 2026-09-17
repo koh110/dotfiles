@@ -141,23 +141,7 @@ async function vim() {
 }
 
 async function zsh() {
-  console.log('backup: zsh')
-  const files = [
-    {
-      from: join(homedir(), '.zshrc'),
-      to: '.zshrc'
-    },
-    {
-      from: join(homedir(), '.zshenv'),
-      to: '.zshenv'
-    }
-  ]
-
-  await Promise.all(
-    files.map(({ from, to }) => {
-      return backupDotfile(from, to)
-    })
-  )
+  console.log('backup: zsh skipped (generated from zsh/* source fragments)')
 }
 
 async function tmux() {
