@@ -188,6 +188,65 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
 
 
+
+## Algorithmic Git Safety Protocol (Mandatory)
+
+このセクションは説明的な推奨事項ではなく、commit / rebase / merge / push の前に実行結果で判定する必須プロトコルである。predicateを満たせない場合は操作を続行せず停止する。
+
+### Pre-flight predicates
+
+履歴を書き換える操作、または既存remote branchを更新する前に、対象branchを確定し、以下を記録する。
+
+```bash
+set -euo pipefail
+branch=$(git branch --show-current)
+test -n "$branch"
+recorded_oid=$(git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
+test -n "$recorded_oid"
+backup_ref="refs/backup/${branch//\//-}-$(date +%s)"
+git update-ref "$backup_ref" HEAD
+printf 'branch=%s\nremote_oid=%s\nbackup_ref=%s\n' "$branch" "$recorded_oid" "$backup_ref"
+```
+
+- `recorded_oid`、対象branch、backup refを保存できない場合は停止する。
+- remote branchがunborn、またはremote OIDを取得できない場合は、既存branchの上書き手順を適用せず、状態を報告する。
+- 対象branchが`main`、`master`、またはrepositoryで保護対象として宣言されたbranchの場合、force pushを実行しない。
+
+### Non-interactive predicates
+
+- commit messageが確定している操作は`git commit -m '…'`または`git commit --no-edit`を使い、エディタを起動しない。
+- コマンドがハングする、または意図せずエディタが起動した場合は、入力を続けず、進行中の操作を`git rebase --abort`または`git merge --abort`で中止する。
+- `GIT_EDITOR=true`等で失敗を隠すのではなく、abort後に原因と現在のHEAD、backup refを報告する。
+
+### Conflict predicates (zero guessing)
+
+- conflict発生時はまず`git status --short`とconflicted pathを取得する。
+- `git rebase --skip`、`git merge --abort`後の無確認retry、または意図不明な自動解決は禁止する。
+- conflict markerが残っている、変更の意味を解釈する必要がある、削除・rename・生成物の採否を判断する必要がある、またはresolutionを機械的predicateで証明できない場合は、直ちに`git rebase --abort`（mergeなら`git merge --abort`）して停止する。
+- 機械的に検証可能な解決を行った場合でも、`git diff --check`、conflict marker検索、`git status --short`がすべて成功するまでcontinueしない。
+- `rebase --continue`が空commit、次のconflict、または別のエラーを返した場合は、結果を分類せず`--skip`しない。状態を保存してabortし、報告する。
+
+### Push and post-push predicates
+
+通常の更新では`git push origin "$branch"`を使う。履歴を書き換えた更新でforceが明示的に許可されている場合だけ`--force-with-lease`を使い、`--force`は使わない。
+
+push前に、作業対象が期待するcommitであることを検証する。
+
+```bash
+set -euo pipefail
+expected_oid=$(git rev-parse HEAD)
+test "$expected_oid" = "$(git rev-parse HEAD)"
+git push origin "$branch" --force-with-lease="refs/heads/$branch:$recorded_oid"
+git fetch --no-tags origin "refs/heads/$branch"
+actual_oid=$(git rev-parse "FETCH_HEAD")
+test "$actual_oid" = "$expected_oid"
+printf 'push_verified branch=%s oid=%s previous_oid=%s\n' "$branch" "$actual_oid" "$recorded_oid"
+```
+
+- lease rejectionはterminal failureとし、fetchしてから再試行したり、leaseなしforceへ変更したりしない。
+- `actual_oid != expected_oid`、fetch失敗、または対象refが期待と異なる場合はpush成功と報告しない。
+- OID比較で検証できない状態は未完了として扱い、push成功を推測しない。
+
 ## Cleanup Guidelines
 
 - cleanup は root checkout と worktree のどちらに対して行うか明確にしてから実行する
