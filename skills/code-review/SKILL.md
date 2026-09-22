@@ -1,6 +1,7 @@
 ---
 name: code-review
-description: '実装コードの独立レビュー、品質ゲート、指摘の判定と修正後closureを、runtimeやproviderに依存せず実行する。'
+description: 'コード差分を独立レビューし、品質ゲート、finding判定、修正後closureを実行するときに使う。'
+version: 1.1.0
 license: MIT
 ---
 
@@ -10,14 +11,13 @@ license: MIT
 
 ## Trigger
 
-以下のいずれかに該当する場合に使用する:
+次の場合に使用します。
 
-- feature、bugfix、refactoring、schema/query変更を実装した
-- 2ファイル以上を変更した
-- commit、push、ship、done、verify、review before mergeを求められた
-- reviewerの指摘を修正し、再確認する
+- ユーザーまたは上位のworking agreementがcode reviewを要求した
+- 既存review findingの修正後closureを行う
+- 対象revisionの品質・correctness・securityを独立contextで判定する
 
-documentation-only、pure config-onlyなどでユーザーが明示的にverificationをskipした場合は、品質ゲートを省略できる。ただし、仕様・契約上qualified reviewが必須とされている作業では、skipの対象と範囲を明示し、qualified reviewを黙ってPASS扱いしてはならない。
+**いつreviewを必須にするか**、**どのcapability tierをqualified reviewerとするか**はこのskillの責務ではありません。このskillはreviewを行う場合のsemantic contractを定義します。
 
 ## Responsibility Boundary
 
@@ -25,15 +25,14 @@ documentation-only、pure config-onlyなどでユーザーが明示的にverific
 - 変更種別ごとのdomain-specific verificationの実行手順は対応するdomain skill・仕様・acceptance criteriaの責務とし、このskillは適用対象の導出、N/A理由の妥当性、`Reviewer Inputs`とevidenceの整合を確認する
 - 仕様書の作成・仕様固有の質問ループは`spec-drilldown`の責務
 - GitHub等の外部reviewシステムへの投稿は、runtime/platform固有adapterの責務
-- runtime固有adapterは、このskillのseverity、Verdict、qualified reviewer条件を変更してはならない
+- runtime固有adapterは、このskillのseverity、Verdict、finding adjudicationを変更してはならない
+- reviewのmandatory conditionとreviewer qualificationは外部policyが定義し、このskillへmodel名や固定thresholdとして埋め込まない
 
 ## Review Gate
 
-自己検証は独立reviewの代替ではない。実装者本人のself-review、test、build、lint、generated-code diffの成功だけではreview完了としない。
+独立reviewとして実行する場合、実装者本人のself-review、test、build、lint、generated-code diffだけを独立reviewの代替にしません。reviewerには対象revisionと必要なReview Inputsを渡し、会話履歴に依存せず判定できる状態にします。
 
-2ファイル以上の変更、またはcommit/pushを伴う変更では、独立したfresh contextのreviewerによる判定を得るまで完了扱い・commit・pushをしてはならない。必要なreviewer tierが別の仕様・運用契約で指定されている場合は、その最低条件を満たすこと。
-
-qualified reviewerが利用できない場合はfail-closedとし、`Pending: qualified reviewer unavailable`として理由を記録する。下位reviewerの出力をqualified reviewのPASSへ昇格させない。
+runtimeまたはpolicyがreviewer qualificationを要求する場合、その条件はadapter/policy側で満たします。利用不能時の停止・fallback条件もpolicy側の責務です。
 
 ## Quality Gates
 
@@ -43,7 +42,7 @@ qualified reviewerが利用できない場合はfail-closedとし、`Pending: qu
 4. 変更意図、エラー処理、入力境界、NULL/enum、transaction、並行性、認証認可、外部I/O、性能、テスト不足を確認する
 5. 新規dependency、abstraction、wrapper、service、config、compatibility layerについて、既存コード・標準機能・platform native機能・導入済みdependencyで代替できないか確認し、不要なowned complexityを指摘する
 6. 変更種別に応じたdomain-specific verificationがある場合は、現在の実行contextでloadされているskillとrepositoryのskill source of truthから対応する手順を解決し、仕様・acceptance criteriaに従って実装者が実行した結果、またはN/A理由を`Reviewer Inputs`へ含める。該当するverificationの集合は実装者の申告だけでなく対象diffの変更種別からreviewerが独立に導出し、実行結果・N/A理由・evidenceの整合を確認する。適用対象の未実行や根拠なしをPASS扱いしない
-7. reviewerの実際のprovider/modelまたは能力tier、対象revision、Verdictを記録する
+7. 対象revisionとVerdictを記録する。policyがreviewer identity/capability evidenceを要求する場合はadapterから取得して併記する
 8. review後に変更があれば、以前のtest/review evidenceを無効化し、最終revisionに対して全gateを再実行する
 
 ## Reviewer Inputs
@@ -124,7 +123,7 @@ Blocking/Majorを修正した場合:
 - [ ] baselineとの差分を含むtest/lint/typecheck/build結果を確認した
 - [ ] 新規dependency / abstraction / wrapper / service / configに不要なowned complexityがないか確認した
 - [ ] 変更種別に応じたdomain-specific verificationを実行した、またはN/A理由を記録した
-- [ ] 独立reviewerの実model/tier、対象revision、構造化Verdictを記録した
+- [ ] 対象revisionと構造化Verdictを記録した
 - [ ] Blocking/Majorが0件である
 - [ ] reviewer指摘をcanonical requirementに照らして判定した
 - [ ] 最終変更後に全gateと必要なclosure reviewを再実行した
@@ -132,4 +131,4 @@ Blocking/Majorを修正した場合:
 
 ## Portability Rule
 
-このskillから特定runtimeのskill名、CLIコマンド、provider、model、認証情報、host pathを参照しない。各runtimeはportableな契約を読み、利用可能な実行手段へadapterする。
+このskillから特定runtimeのskill名、CLIコマンド、provider、model、認証情報、host path、review mandatory thresholdを参照しない。各runtimeはportableな契約を読み、利用可能な実行手段へadapterする。
