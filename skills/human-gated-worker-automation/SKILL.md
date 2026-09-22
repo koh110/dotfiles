@@ -101,26 +101,22 @@ entity単位の適用を選んだのに、all-or-nothing semanticsとして説�
 
 既存のsource refreshと新しいprepare flowが同じscheduleを共有している場合は、時刻を変更するか、明示的なgeneration/version barrierを追加してください。偶然のtimingに依存しないでください。
 
-## Scheduled agentの挙動とchat delivery
+## Runtime integration boundary
 
-人間からのreplyを受け取る必要があるjobでは、model-drivenで会話継続可能なjobと専用のorigin thread/sessionを使います。semantic judgmentやconfirmationをscript-only executionで済ませないでください。script-only jobには会話上のmodel turnがありません。
+このskillはprepare → decision → confirm → applyのdomain contractを定義します。scheduler/job、session/thread継続、model/provider pin、duplicate message handling、runtime固有tool/permissionはadapterの責務です。
 
-scheduled jobはfreshなagent sessionで実行される可能性があるため、job promptは自己完結させます。少なくとも次を含めます。
+runtime integrationでは、次のcapabilityが必要かだけをdomain側から宣言します。
 
-- secret value自体を露出しないWorker API endpointとauthentication mechanism
-- prepare/decision/confirm/apply sequence
-- structured decision schema
-- 絶対にoverwriteしてはいけないもの
-- approved runの識別方法
-- partial successとfailureのreport方法
+- human confirmationを受け取れる継続可能なinteraction
+- approved run/proposal identityをapplyへ引き渡せること
+- authentication secretをmodel outputへ露出せずWorker/APIを呼べること
+- structured decision contractを保持できること
+- partial success/failureをuser-visibleにreportできること
 
-runtimeがjob単位のmodel/provider pinをサポートする場合はunattended jobでpinし、delivery先はorigin chat/threadへ限定します。scheduled jobから再帰的にscheduled jobを作らせないでください。
-
-## Decision endpoint adapterとchat delivery
+## Decision endpoint contract
 
 Worker contractがentity単位のrecommendation stateとfield単位のactionを分離している場合は、entityごとに1つのdecision objectを構築します。各 `updatableFields` を `fields` recordで表し、そのnested actionを理由付きの `skip` として明示します。endpoint contractが明示的に要求しない限り、`{field, action}` のflat listを送らないでください。skipするfieldにproposed valueを含めないでください。candidate messageをpostする前にlive response contractをvalidateします。再利用可能なschema probeとadapterの詳細は [`references/decision-endpoint-adapter.md`](references/decision-endpoint-adapter.md) を参照してください。
 
-runtimeが同一targetへのduplicate postを抑止する場合、追加で完全一致のcandidate messageを送る必要があるなら、platform adapterが提供するdocumented separate-send mechanismを使います。返されたmessage IDを確認し、final reportとは分離し、candidate bodyを変更しないでください。
 
 ## よくある問題
 
@@ -155,4 +151,4 @@ runtimeが同一targetへのduplicate postを抑止する場合、追加で完�
 
 - 人間承認付きdaily ranked-data workflowの短い例は `references/portfolio-research-run-example.md` を参照する。
 - specification-firstの質問とadversarial reviewには既存の `spec-drilldown` skillを使う。
-- 既存scheduled jobの編集には、そのruntime向けのjob-maintenance機能を使う。このskillはdomain design contractを定義し、runtime固有のjob編集手順は定義しない。
+- scheduler/chat/runtimeへの接続はadapter側で行う。このskillはdomain design contractだけを定義する。

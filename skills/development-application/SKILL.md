@@ -1,21 +1,11 @@
 ---
 name: development-application
-description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、telemetry/privacy契約の整合と再利用可能な学びをskillへ反映する。'
+description: 'アプリケーション実装で、実装手段の選択、I/O、test infrastructure、monorepo、platform制約、DB/API設計を検討するときに使う。'
 ---
 
-## Independent Review Gate
+# Development Application
 
-- コードを変更する実装・リファクタリング・bugfixでは、実装開始前に共有の`code-review` skillをロードして従う
-- `code-review`が利用できない環境では、portableなレビュー契約を満たす独立reviewer（fresh context）へadapterし、特定runtimeのskill名を仮定しない
-- ローカルの実装品質ゲートは`code-review`、仕様書の質問・仕様reviewは`spec-drilldown`、GitHub PRへの取得・コメント・判定投稿はplatform adapterの責務とする
-- 2ファイル以上を変更する場合、またはcommit/pushを伴う場合は、`code-review`の独立reviewer判定を得るまで完了扱い・commit・pushをしてはならない
-- test、build、lint、生成コード検証は自己検証であり、独立reviewの代替にはならない
-- documentation-only / pure config-onlyでユーザーが明示的にverificationをskipした場合は品質ゲートを省略できる。ただし、仕様・契約上qualified reviewが必須の場合は、skipの対象外として理由を記録する
-
-## Specification First
-
-- アプリケーション・新機能の作成依頼で仕様が曖昧な場合、実装や plan 作成に着手する前に `spec-drilldown` skill を実行し、仕様を磨き込んでから実装する
-- 承認された仕様書なしに新規作成の実装を始めない（明確な bugfix や仕様の自由度がない作業は除く）
+このskillはmodel/runtimeをまたいで再利用できるengineering knowledgeを定義します。reviewを必須にする条件、仕様書を必須にする条件、compatibility方針、質問/停止条件、完了時の検証範囲などのworking agreementはこのskillでは定義しません。
 
 ## Implementation Selection
 
@@ -38,19 +28,10 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 
 ## General Guidelines
 
-- **明示的な指定がない限り、PRのtarget/base branchとの差分を最小にして着手する**。PR target/base branchが明示されている場合はそれを優先し、未指定の場合だけ`git ls-remote --symref origin HEAD`等のauthoritative remote metadataからdefault branchを解決する。通常は`main`、存在しなければ`master`等だが、branch名を推測しない。開始前に目的・受け入れ条件・変更対象を列挙し、各変更が目的達成に必要かを確認する。既存の未マージbranch、作業途中のworktree、関連機能の実装をそのまま土台にしない
-- **スコープ外の機能を依存扱いしない**。対象機能が実際にimport・route・schema・runtimeで参照している証拠がない限り、関連しそうな機能（例: engagement）を追加・復活させない。必要に見える場合は、まず確定したPR target/base branch起点の最小構成で検証し、失敗ログと依存箇所を示してから拡張する
-- 作業報告をする際に何が保証され、特に **何を保証していないか** を説明する
-- 互換性を考慮した実装をしない。課題に対して0ベースで最適な実装を選択する
-- 既存実装の延命より作り直しを優先する
-- 移行コストより新規実装の保守性と単純性を優先する
-- 互換レイヤーやフォールバック実装を禁止する
-- 「diff最小」と「作り直し優先」が衝突する場合の優先順位: まず設計として最適な方（作り直しを含む）を選び、その設計の実現に不要な変更を diff に含めない。「diff最小」を理由に劣った設計へ妥協しない
-- データアクセス（SQL query / API call / file I/O）を件数 N に比例して繰り返す実装を避け、一括取得・一括書き込み（バルク操作・JOIN・IN句等）で件数に依存しない回数に抑える
-- ループ処理の内部でSQLのINSERT/UPDATE/DELETEを繰り返し実行することを禁じる
-- 外部システムの実データ（本番スプレッドシート・外部API・DBの実レコード等）の状態が前提になる原因調査では、コード差分や git 履歴からの推論だけで仮説を確定して修正しない。**修正前に実データを直接確認する**（例: spreadsheet なら `google-spreadsheet` skill で該当セルを実際に読む）。独立レビュー（finish-review 等）は diff とコードベースの内部整合性しか検証できず、外部データ前提の正しさは保証しないため、レビュー通過を仮説の裏付けとして扱わない
-- **モノレポで package 間の設定・utility を共通化する設計をデフォルトにしない**。context が異なる package は一見同型でも分離を優先する（`tsconfig.base` のような共通化は、後から差分が出たときに全 package を巻き込む）。logger や fetcher のような「共通に見える」実装も同じで、共通化するのは変更理由が同一であることを説明できる場合だけにする
-- プロジェクト内の agent 向け knowledge（規約・手順のドキュメント）は、特定の agent ツールに依存しないツール中立な単一実体として置く。ツールごとにディレクトリを複製しない（実体は1つ、各ツールからは薄いポインタで参照する）
+- データアクセス（SQL query / API call / file I/O）を件数 N に比例して繰り返す実装を避け、一括取得・一括書き込み（bulk操作・JOIN・IN句等）で件数に依存しない回数へ抑える。
+- loop内部でSQLのINSERT/UPDATE/DELETEを繰り返す前に、set-based operationやbulk writeで表現できないか確認する。
+- 外部システムの実データ状態が原因調査の前提になる場合、コード差分やgit履歴だけで仮説を確定せず、利用可能なら実データまたはauthoritative responseを確認する。
+- project内のagent向けknowledgeは、特定agent用に内容を複製するのではなく、portableなsemantic coreとruntime adapterを分離する。
 
 ## Telemetry and Privacy Contract
 
@@ -58,13 +39,6 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - 自動収集型analytics SDK（GA4など）による自動収集と、診断・操作に紐づく明示的なevent送信を区別して説明する。未送信の情報を送信すると読める表現や、送信される情報を過小申告する表現を残さない
 - schema/API/実装側でparameterのキー集合を取得できる場合は、テストでeventごとのキー集合をexactに検証する。文言だけのテストにせず、実装契約の変更を検出できるようにする
 - telemetry/privacy変更がない作業では、この検証をN/Aとして扱い、N/A理由を独立reviewのinputsへ記録する
-
-## Change Scope and Completeness
-
-- **1箇所を直したら、同一パターンが repo 内に他にないかを grep で確認し、残件の有無を完了報告に含める**。lint の ignore 解消・エラー契約の統一・型注釈の追加など「パターンで書かれたもの」は特に漏れやすい。残件が多くスコープを超える場合は、着手前にスコープを確認する
-- あるステータスやエラー型に適用した設計は、**対称性のある兄弟概念にも適用すべきかを完了報告の前に検討する**（400 に対する 500、BadRequestError に対する InternalServerError など）。片側だけ直して報告すると、ほぼ必ずもう片側を指摘される
-- **アプローチを別案へ置き換えたら、旧アプローチの生成物の棚卸しを行う**。lint ルール・設定ファイル・生成コード・ドキュメントが不要になっていないかを確認し、削除要否を報告する
-- **当初の依頼から作業スコープが2段階以上拡大したら、セッション / PR の分割をユーザーへ提案する**。1セッションに詰め込むと context 枯渇と API エラーで手戻りが増える（実測: lint plugin 開発 + 契約追加 + 全面リファクタを1セッションに入れて transcript が 11MB に達し、auto-compact と接続断が多発した）
 
 ## Test Infrastructure Preservation
 
@@ -82,11 +56,6 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - 各パッケージは実行コンテキストが異なる(Node ESM バックエンド、Next.js フロントエンド、dev専用CLI 等)。今の実装が偶然似ている・フレームワーク非依存に書けているとしても、それは本質的な共通性の証明にはならない。重複を許容し、各パッケージを自己完結させる
 - shared に置いてよいのは、API契約やDBスキーマのようにフレームワーク・実装に関わらず常に同一であるべきもの(生成された OpenAPI schema 型、Prisma client、Result 型など)に限る
 - 共通化を提案する前に「client パッケージが全く別のフレームワークで書き直されたら、この共通化は成立するか?」と自問する
-
-## Design Decision Escalation
-
-- **どちらにも筋が通る設計分岐は単独で決めず、選択肢と影響範囲を提示して確認する**。例: 既存の宣言(型・契約・設定)と実装の実態が食い違っている場合、宣言を実態へ合わせるか実態を宣言へ合わせるかはどちらも成立し得る設計判断であり、確認なしに一方へ倒さない
-- **観測事実と推論を分離して報告する**。影響（壊れる / drift している等）や原因を主張する前に再現観測で裏取りし、未観測の主張には「推定」と明記する。CLI 出力の欠落は `--json` 等の機械可読形式で裏取りしてから結論する
 
 ## Platform Constraint Guidelines
 
@@ -112,23 +81,6 @@ CREATE TYPE import_config_status AS ENUM ('active', 'disabled');
 status import_config_status NOT NULL DEFAULT 'active'
 ```
 
-## Skill Feedback
-
-- 作業中に再利用可能な修正・不足手順・新しい pitfall・変更された運用ルール・より良い完了条件を見つけたら、関連 skill の更新をユーザーに提案することを作業完了条件に含める
-- 既存 skill の修正で足りるなら patch し、既存の受け皿がない再利用可能な手順なら新しい skill を作る
-- 判断に迷う場合は `skill-feedback-criteria` を参照し、skill に反映すべきでない場合でも durable な記録へ残すべきかを判断する
-- skill を更新できなかった場合は、その理由と暫定的に残した記録先を完了報告に明記する
-
-## Completion
-
-- 実装完了後に必ずlint/build/testを実行し、エラーが発生しなくなるまで繰り返し修正を行う
-  - testやlintの実行はciのコマンドを参照して実行する
-  - lintのエラーの場合まずは自動修正を試みる
-- 変更種別に応じたdomain-specific verificationを実行し、適用対象外の場合はN/A理由を独立reviewのinputsへ記録する
-- 実現した仕様を最後に簡潔に説明する
-- 他のskillが同時にloadされている場合、そのskillの **禁止事項** を完了前チェックに含めること
-- skill違反を見つけた状態で「完了」扱いすることを禁じる。違反がある場合は必ず修正を優先すること
-- 「skillは読んだが実装では逸脱した」という失敗を防ぐため、変更したファイルに対して skill違反の再読チェックを完了前に必ず行うこと
 
 ## API / Interface Design Guidelines
 
