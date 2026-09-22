@@ -56,7 +56,7 @@ model名やruntime tool名は入れません。
 - runtimeが作るworktree等の環境差
 - scheduler/chat delivery等、そのskillに固有のruntime integration
 
-runtime全体のdiscovery/deployだけはroot `adapters/` に置きます。
+runtime全体のdiscovery/deployは `deploy.ts` 等の配布コードがskill-local adapterを集約して実現し、手書きadapter本文をrootへ複製しません。
 
 ## Model profile
 
@@ -92,5 +92,5 @@ incident timeline、特定PRの経緯、一時的service behavior、timestamp付
 - [ ] core / policy / runtime / exact model / incident のどれに依存するか分類した
 - [ ] 同じsemantic ruleを複数layerへ重複させていない
 - [ ] skill directory単体で関連overlayまで持ち運べる
-- [ ] root adapterへtask-specific ruleを入れていない
+- [ ] adapter本文のsource of truthが対象skill directory内にある
 - [ ] profileにはexact model identityと根拠がある

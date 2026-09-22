@@ -33,15 +33,17 @@ skills/<name>/
 | `references/` | progressive disclosureする詳細知識 |
 | `scripts/` | deterministicに実行できる補助tool |
 
-## Root-level adapter
+## Adapter deployment
 
-repository rootの `adapters/` は例外で、**runtime全体のdiscovery/deploy router** だけを置きます。
+adapterのsource of truthも各skill directoryに置きます。
 
-- skill directoryのinstall先
-- skill-local policy/profile/adapterをどう発見するか
-- global instruction入口への薄いrouter
+`deploy.ts` は `skills/*/adapters/<runtime>.md` を列挙し、runtimeのglobal instruction fileにmanaged blockとして集約します。したがって、rootに手書きのadapter instructionを持ちません。
 
-task-specificなsemantic ruleはroot adapterへ持ち込みません。
+- source of truth: `skills/<name>/adapters/<runtime>.md`
+- generated destination: runtimeの `AGENTS.md` / `CLAUDE.md` 等
+- deploy codeはadapter本文を所有せず、収集・配置だけを行う
+
+これによりskill directory単体でpolicy/profile/adapterまで持ち運べます。
 
 ## SKILL.md
 

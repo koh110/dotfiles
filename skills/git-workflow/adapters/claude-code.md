@@ -1,14 +1,10 @@
-# Claude Code worktree adapter
+# Claude Code adapter
 
-Claude Codeなどのharnessが事前にlinked worktreeを用意する場合、pathが `policies/default.md` の `.worktree/` conventionと異なっていても、それだけを理由に新しいworktreeを作りません。
+Trigger this skill for Git operations and for repository edits that may later be committed or reviewed.
 
-例として `.claude/worktrees/<name>/` のようなruntime-owned pathが存在し得ます。
+When triggered:
+- load `../SKILL.md`
+- load `../policies/default.md`
+- determine worktree state from Git metadata rather than directory naming
 
-判定はpath文字列ではなくGit metadataで行います。
-
-```bash
-git_dir=$(git rev-parse --path-format=absolute --git-dir)
-common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
-```
-
-`git_dir != common_dir` なら既存linked worktreeとして扱い、`policies/default.md` の「既存linked worktreeを再利用」に従います。
+Claude Code may create linked worktrees under runtime-owned paths such as `.claude/worktrees/<name>/`. If `git_dir != common_dir`, treat it as an existing linked worktree and follow the policy to reuse it instead of creating another worktree.
