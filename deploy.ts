@@ -93,7 +93,7 @@ async function main() {
 }
 main().catch(console.error)
 
-const AGENT_RESOURCE_DIRS = ['skills', 'adapters'] as const
+const AGENT_RESOURCE_DIRS = ['skills'] as const
 
 async function deployAgentResources(name: string, targetDirName: string) {
   console.log('copy: ' + name)
@@ -106,14 +106,14 @@ async function deployAgentResources(name: string, targetDirName: string) {
   }
 }
 
-async function deployAdapterInstruction(
-  source: string,
+async function deployRuntimeSkillAdapters(
+  runtime: string,
   targetDirName: string,
   targetName: string
 ) {
   const targetDir = join(homedir(), targetDirName)
   const targetPath = join(targetDir, targetName)
-  const sourceContent = await readFile(join(import.meta.dirname, source), 'utf8')
+  const sourceContent = await collectSkillAdapters(runtime)
   let targetContent = ''
 
   await mkdir(targetDir, { recursive: true })
@@ -125,8 +125,35 @@ async function deployAdapterInstruction(
     }
   }
 
-  const marker = `dotfiles managed ${source}`
+  const marker = `dotfiles managed skill adapters ${runtime}`
   await writeFile(targetPath, mergeManagedMarkdown(targetContent, sourceContent, marker))
+}
+
+async function collectSkillAdapters(runtime: string) {
+  const skillsDir = join(import.meta.dirname, 'skills')
+  const skillNames = (await readdir(skillsDir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+
+  const fragments: string[] = []
+  for (const skillName of skillNames) {
+    const adapterPath = join(skillsDir, skillName, 'adapters', `${runtime}.md`)
+    try {
+      const content = await readFile(adapterPath, 'utf8')
+      fragments.push(`## Skill package: ${skillName}\n\n${content.trim()}`)
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+        throw error
+      }
+    }
+  }
+
+  return [
+    '# Managed skill adapters',
+    'The sections below are generated from skills/*/adapters and should not be edited here.',
+    ...fragments,
+  ].join('\n\n')
 }
 
 function mergeManagedMarkdown(target: string, source: string, marker: string) {
@@ -180,11 +207,11 @@ async function claude() {
   }
   await Promise.all([
     deployAgentResources('claude', '.claude'),
-    deployAdapterInstruction('adapters/claude-code/CLAUDE.md', '.claude', 'CLAUDE.md'),
+    deployRuntimeSkillAdapters('claude-code', '.claude', 'CLAUDE.md'),
   ])
   // manifest はportable resource以外のキー(claude/agents・hooks・settings.json等)を
   // 保持したままマージする。ここで書き込むのはmainが実際にdeployした
-  // skills/adaptersの範囲だけで、他のmanaged keyは消さない。
+  // skills/の範囲だけで、他のmanaged keyは消さない。
   const manifest = await readManifest()
   for (const e of entries) {
     const h = await hashFile(e.src)
@@ -291,7 +318,7 @@ function reportDrift(drift: { rel: string; reason: string }[]) {
 async function codex() {
   await Promise.all([
     deployAgentResources('codex', '.codex'),
-    deployAdapterInstruction('adapters/codex/AGENTS.md', '.codex', 'AGENTS.md'),
+    deployRuntimeSkillAdapters('codex', '.codex', 'AGENTS.md'),
     deployCodexAgents(),
     deployCodexConfig(
       join(import.meta.dirname, '.codex/config.toml'),
