@@ -7,6 +7,7 @@
 必要な場合だけ次を読む:
 
 - application/code変更: `~/.claude/policies/development.md`
+- git操作・repository内の編集: `~/.claude/policies/git-workflow.md`
 - 独立reviewの要否・reviewer条件: `~/.claude/policies/review.md`
 - 新規機能・architectureの仕様化: `~/.claude/policies/specification.md`
 
@@ -20,4 +21,4 @@ runtimeからexactなactive model identityが分かり、`~/.claude/profiles/` �
 
 ## Boundary
 
-Claude Code固有のworktree/tool/permission挙動はこのadapter/runtime設定で扱い、portable skillへ書き戻さない。
+Claude Code固有のworktree/tool/permission挙動はこのadapter/runtime設定で扱い、portable skillへ書き戻さない。既存linked worktreeのruntime差分は `~/.claude/adapters/claude-code/worktrees.md` を必要な場合だけ参照する。

@@ -7,6 +7,7 @@
 必要な場合だけ次を読む:
 
 - application/code変更: `~/.codex/policies/development.md`
+- git操作・repository内の編集: `~/.codex/policies/git-workflow.md`
 - 独立reviewの要否・reviewer条件: `~/.codex/policies/review.md`
 - 新規機能・architectureの仕様化: `~/.codex/policies/specification.md`
 
