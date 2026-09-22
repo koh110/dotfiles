@@ -1,105 +1,119 @@
 ---
 name: skill-feedback-criteria
-description: '作業中に見つかった学びを既存skillへpatchすべきか、新しいskillを作るべきか、durableな記録だけで十分かを判定するときに使う。再利用可能性・影響範囲・鮮度・記録先を切り分けるための基準。'
+description: '作業中に得た学びをskill、policy、runtime adapter、model profile、durable recordのどこへ反映するか判定するときに使う。'
 ---
 
-# Skill Feedback Criteria
+# Guidance Feedback Criteria
 
 ## Goal
 
-作業中に得た学びを、
+学びを「再利用できるか」だけでなく、**何に依存する知識か**で分類して正しいsource of truthへ反映する。
 
-1. 既存 skill の更新
-2. 新しい skill の作成
-3. issue / comment / 調査メモなど durable な記録
-4. 何もしない
+- `skills/`: task-specificなdomain knowledge / workflow contract
+- `policies/`: taskをまたいで守らせるuser/repository working agreement
+- `adapters/`: runtime/tool/platform固有のintegration
+- `profiles/`: exact model固有のbehavior compensation
+- durable record: incident、特定PR、時刻付き観測などの事案固有情報
+- no-op: 自明、短命、重複、再利用価値なし
 
-のどれに送るべきかを判断する。
+## Decision order
 
-## Quick Decision Order
+1. timestamp、log、特定PR/incidentなど事案固有ならdurable record。
+2. installation path、tool名、permission、scheduler、transport等のruntime固有情報ならadapter。
+3. exact modelだけの挙動差を補う指示ならprofile。根拠とexact identityが必要。
+4. review必須条件、worktree運用、decision boundary等のcross-task working agreementならpolicy。
+5. domain invariant、algorithm、task固有workflow/pitfall/verification contractならskill。
+6. どこにも永続化する価値がなければno-op。
 
-1. **次回以降も同じ種類の作業で再利用されるか** を判断する
-2. **既存 skill の修正で吸収できるか** を確認する
-3. **skill にするほど一般化できるか** と **private/public の置き場** を決める
-4. skill にしない場合でも **durable な記録を残すべきか** を判断する
+## Skill
 
-## Patch Existing Skill When
+Skillへ入れるもの:
 
-- 今回の学びが、すでに存在する skill の trigger 範囲に自然に収まる
-- その学びが次回の手順・禁止事項・pitfall・完了条件を実際に変える
-- 「その skill を読んでいれば今回の手戻りを避けられた」と言える
-- 変更内容が task 固有の結果ではなく、workflow の改善になっている
+- 特定種類のtaskで再利用される。
+- model/runtimeが変わってもsemantic contentが変わらない。
+- workflow、domain invariant、protocol、algorithm、task固有pitfallとして表現できる。
+- skill directory単体で意味が完結する。
 
-例:
-- コマンドの前提条件が抜けていた
-- repo-backed skill は `skill_manage` でなく source file 直patch が必要だった
-- incident 調査で durable なログ記録を先に作るべきだった
-- 完了条件に verification 手順が不足していた
+新しいskillを作る前に、既存skillのsection/reference追加で十分か確認する。root `SKILL.md` はtrigger/routerとして簡潔に保ち、詳細はreferences/scriptsへ分ける。
 
-## Create New Skill When
+## Policy
 
-- 再利用可能な workflow だが、既存 skill に自然な受け皿がない
-- 単発メモではなく、今後も同種タスクで読み込ませる価値がある
-- 複数ステップの判断や手順があり、skill 化で挙動が安定する
-- 5回前後以上の tool 呼び出し・繰り返し説明・毎回の迷いを減らせる
+Policyへ入れるもの:
 
-新 skill を作る前に確認すること:
-- 既存 skill の section 追加で十分ではないか
-- どのディレクトリに存在する skill が source of truth にふさわしいか
+- taskをまたいで守らせたい選好、品質基準、decision boundary。
+- 「いつreview必須か」「dedicated worktreeを使うか」「どこまで自律判断してよいか」など。
 
-## Durable Record Only When
+Policyにはmodel名やruntime tool名を混ぜない。
 
-- 学びの中心が時刻・観測値・調査ログ・対処履歴などの **事案固有の証拠** である
-- workflow そのものより、「今回何が起きたか」を残す価値が高い
-- 将来参照されるとしても、skill ではなく issue / comment / 調査メモのほうが適切
-- 鮮度が短く、数日〜数週間で価値が薄れる
+## Adapter
 
-例:
-- 2026-06-25 18:27 JST に php-fpm が `pm.max_children=300` に達した
-- ある障害の一時的な origin 切り分け結果
-- 特定 PR / issue / インシデントに閉じた判断経緯
+Adapterへ入れるもの:
 
-## Do Nothing When
+- instruction/skillのinstall・discovery方法
+- runtime固有tool名、permission syntax
+- scheduler/job、chat/thread delivery
+- runtimeが作るworktree等の環境差
+- model/provider pinのruntime-specific method
 
-- 学びが自明で、skill を読まなくても通常の実務で避けられる
-- タスク固有すぎて再利用性がない
-- 一週間程度で陳腐化し、durable に残すコストの方が高い
-- すでに同じ内容が skill や durable record にあり、重複するだけ
+Portable contractの内容自体はadapterで変更しない。
 
-## Heuristics
+## Model profile
 
-### skill に反映する寄りのシグナル
+Profileは次をすべて満たす場合だけ使う。
 
-- 同じ説明や修正を次回また言いそう
-- 「この一文があれば迷わなかった」と言える
-- 失敗原因が knowledge gap で、コードや外部障害の偶然ではない
-- 完了条件を変えるべきだと思った
-- 別セッションの自分/他エージェントにも効く
+- exact model identityを特定できる。
+- official guidanceまたは反復可能な観測根拠がある。
+- 共通skill/policyへ入れると他modelへ悪影響があり得る。
+- 小さなbehavior overlayとして表現できる。
 
-### durable record に残す寄りのシグナル
+同じprovider/familyという理由で近似profileへ流用しない。unknown modelはprofileなしをdefaultにする。
 
-- タイムライン、証拠、スクリーンショット、ログ抜粋が主役
-- 後から「なぜそう判断したか」を監査できることが重要
-- 進行中の調査で、会話圧縮に耐える外部記録が必要
+## Durable record
 
-## Completion Rule
+次はissue/comment/調査メモ等へ残す。
 
-この skill を使って判断したら、完了条件は「どれに残すか決めた」ではなく、**実際に反映先を更新した** こと。
+- timestamp付き観測値
+- incident timeline
+- 特定PR/issueだけの判断経緯
+- 一時的なservice behavior
+- screenshot/log excerpt
 
-- skill patch/create を選んだ → 対象 skill を更新する
-- durable record を選んだ → issue / comment / 調査メモへ実際に記録する
-- 何もしないを選んだ → 重複または非再利用と判断した理由を短く説明する
+後から一般化できるpatternが見つかった時点で適切なlayerへ抽出する。
 
-## Common Mistakes
+## Examples
 
-- 学びを chat の最終報告だけに残して source of truth を更新しない
-- 事案固有のタイムラインを skill に埋め込んでしまう
-- 新 skill を作るべきところで、関係ない skill に無理やり追記する
-- 「あとで skill に反映する」と言って実際には反映しない
+- reviewのfinding schema → skill
+- 2ファイル以上なら独立review必須 → policy
+- 特定runtimeのlinked worktree path → adapter
+- 特定modelでだけ不要なverification promptを減らす → profile
+- 昨日のAPI障害ログ → durable record
+
+## Common mistakes
+
+- runtime固有path/toolをportable skillへ書く。
+- modelの癖を全model共通policyへ昇格する。
+- user/repository preferenceをdomain invariantとしてskillへ埋め込む。
+- incident logをskillへ貼る。
+- 同じsemantic ruleを複数layerへ重複コピーする。
+- root `SKILL.md` を全知識のdumpにする。
+
+## Completion
+
+分類だけで終えず、選んだsource of truthを実際に更新する。
+
+- skill → skill/reference/script
+- policy → policy
+- adapter → runtime adapter
+- profile → exact model profile。根拠も残す
+- durable record → issue/comment/調査メモ
+- no-op → 重複または非再利用と判断した理由を短く残す
 
 ## Verification
 
-- 反映先は skill / durable record / no-op のどれかに明示的に分類したか
-- skill を選んだ場合、その変更は task 固有の結果ではなく再利用可能な workflow 改善になっているか
-- durable record を選んだ場合、後から第三者が経緯を追えるだけの証拠を残したか
-- source of truth を更新したか
+- [ ] task / user-repo / runtime / exact model / incident のどれに依存するか分類した
+- [ ] semantic ruleを複数layerへ重複させていない
+- [ ] skillはmodel/runtime非依存で単体完結している
+- [ ] policyにmodel/runtime固有情報が混ざっていない
+- [ ] adapterはportable contractを変更していない
+- [ ] profileにはexact identityと根拠がある
+- [ ] source of truthを実際に更新した
