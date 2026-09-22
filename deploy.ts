@@ -93,13 +93,27 @@ async function main() {
 }
 main().catch(console.error)
 
-async function deploySkills(name: string, targetDirName: string) {
+const AGENT_RESOURCE_DIRS = ['skills', 'policies', 'profiles', 'adapters'] as const
+
+async function deployAgentResources(name: string, targetDirName: string) {
   console.log('copy: ' + name)
   const targetDir = join(homedir(), targetDirName)
   await mkdir(targetDir, { recursive: true })
-  await cp(join(import.meta.dirname, 'skills'), join(targetDir, 'skills'), {
-    recursive: true
-  })
+  for (const dir of AGENT_RESOURCE_DIRS) {
+    await cp(join(import.meta.dirname, dir), join(targetDir, dir), {
+      recursive: true
+    })
+  }
+}
+
+async function deployAdapterInstruction(
+  source: string,
+  targetDirName: string,
+  targetName: string
+) {
+  const targetDir = join(homedir(), targetDirName)
+  await mkdir(targetDir, { recursive: true })
+  await cp(join(import.meta.dirname, source), join(targetDir, targetName))
 }
 
 async function deployCodexAgents() {
@@ -112,7 +126,7 @@ async function deployCodexAgents() {
 }
 
 async function copilot() {
-  await deploySkills('copilot', '.copilot')
+  await deployAgentResources('copilot', '.copilot')
 }
 
 async function claude() {
@@ -132,7 +146,10 @@ async function claude() {
     process.exitCode = 1
     return
   }
-  await deploySkills('claude', '.claude')
+  await Promise.all([
+    deployAgentResources('claude', '.claude'),
+    deployAdapterInstruction('adapters/claude-code/CLAUDE.md', '.claude', 'CLAUDE.md'),
+  ])
   // manifest は skills/* 以外のキー(claude/agents・hooks・settings.json。dev branch の
   // .worktree/mf 側で deploy された分)を保持したままマージする。ここで書き込むのは
   // main が実際に deploy した skills/* の範囲のみで、他ブランチが書いたキーを消さない。
@@ -170,16 +187,20 @@ async function hashFile(path: string): Promise<string | null> {
   }
 }
 
-// main branch の claude() は skills/ のみを deploy する（agents/hooks/settings.json は
-// .worktree/mf (dev branch) にのみ存在し、この worktree では扱わない）。
+// main branch の claude() はportable agent resourcesとglobal routerだけをdeployする。
+// agents/hooks/settings.json は .worktree/mf (dev branch) 側の責務とする。
 async function claudeDeployEntries(): Promise<DeployEntry[]> {
   const home = join(homedir(), '.claude')
   const root = import.meta.dirname
   const entries: DeployEntry[] = []
-  for (const f of await listFiles(join(root, 'skills'))) {
-    const rel = join('skills', relative(join(root, 'skills'), f))
-    entries.push({ rel, src: f, dst: join(home, rel) })
+  for (const dir of AGENT_RESOURCE_DIRS) {
+    for (const f of await listFiles(join(root, dir))) {
+      const rel = join(dir, relative(join(root, dir), f))
+      entries.push({ rel, src: f, dst: join(home, rel) })
+    }
   }
+  const claudeMd = join(root, 'adapters', 'claude-code', 'CLAUDE.md')
+  entries.push({ rel: 'CLAUDE.md', src: claudeMd, dst: join(home, 'CLAUDE.md') })
   return entries
 }
 
@@ -239,7 +260,8 @@ function reportDrift(drift: { rel: string; reason: string }[]) {
 
 async function codex() {
   await Promise.all([
-    deploySkills('codex', '.codex'),
+    deployAgentResources('codex', '.codex'),
+    deployAdapterInstruction('adapters/codex/AGENTS.md', '.codex', 'AGENTS.md'),
     deployCodexAgents(),
     deployCodexConfig(
       join(import.meta.dirname, '.codex/config.toml'),
