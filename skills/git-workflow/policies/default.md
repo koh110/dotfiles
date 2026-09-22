@@ -1,6 +1,6 @@
 # Git workflow policy
 
-このpolicyはGit skillの上に適用する個人のworking agreementです。Git mechanicsと安全contractは `skills/git-workflow` を使います。
+このpolicyは `git-workflow` skillに紐づく個人のworking agreementです。Git mechanicsと安全contractは同directoryの `../SKILL.md` を使います。
 
 ## Dedicated worktree
 

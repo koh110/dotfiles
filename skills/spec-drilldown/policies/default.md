@@ -1,6 +1,7 @@
 # Specification policy
 
-このpolicyは **いつ仕様化を必須にするか** を定義します。仕様書の構成・technical investigation・review schemaは `skills/spec-drilldown` のcontractを使います。
+このpolicyは `spec-drilldown` skillに紐づき、**いつ仕様化を必須にするか** を定義します。
+仕様書の構成・technical investigation・review schemaは同directoryの `../SKILL.md` と `../references/` を使います。
 
 ## Require a specification when
 

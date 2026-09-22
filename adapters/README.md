@@ -1,16 +1,14 @@
 # Runtime adapters
 
-`adapters/` はportableなskills/policies/model profilesを、各runtimeのinstruction discovery・tool・permissionへ接続する層です。
+rootの `adapters/` は、skill package群を各runtimeのinstruction discoveryへ接続する **global routerだけ** を置きます。
 
-Adapterの責務:
+task-specificなpolicy/profile/runtime差分は原則として各 `skills/<name>/` 配下に置きます。
 
-- global policy routerをruntimeの常時instruction入口へ配置する
-- task-specific skillはruntime標準のskill discoveryへ配置する
-- exact model identityが分かる場合だけ一致する `profiles/` を参照させる
-- runtime固有のtool名、permission、scheduler、chat delivery、model pinへ変換する
+root adapterの責務:
 
-Adapterはsemantic contractを変更しません。
+- skill packageのinstall/discovery方法
+- skill-local `policies/` / `profiles/` / `adapters/` の読み分け
+- runtimeのglobal instruction入口
+- runtime全体にしか存在しないpermission/tool設定
 
-- reviewのseverityや合格条件をruntime都合で弱めない
-- policyで必要なhuman decisionをmodel都合で自動化しない
-- model profileを他modelへ流用しない
+root adapterはskillのsemantic contractやpolicyを複製しません。

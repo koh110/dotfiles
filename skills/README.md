@@ -1,66 +1,61 @@
 # Skills の方針
 
-`skills/` は、複数のagent runtime・modelで再利用できる **task-specificな知識とworkflow contract** のsource of truthです。
+`skills/` は、複数のagent runtime・modelで再利用できるskill packageのsource of truthです。
 
-## Guidance layer
+## 1 skill = 1 portable package
 
-agent向けの永続的な指示を、次の4層に分離します。
+policy / model profile / runtime adapterが **そのskillにだけ関係するなら、同じskill directoryへ置きます**。
 
-| Layer | 役割 | model/runtime依存 |
-| --- | --- | --- |
-| `skills/` | domain knowledge、workflow、不変条件、検証contract | 依存させない |
-| `policies/` | 個人・repositoryとして常時守らせたい開発方針 | modelには依存させない |
-| `adapters/` | runtimeのinstruction discovery、tool、permission、deliveryへの変換 | runtime依存 |
-| `profiles/` | 特定modelの既知の挙動差だけを補正するoverlay | model依存 |
-
-Skillへ「特定modelをうまく働かせるための矯正」を埋め込まないでください。別modelでは逆効果になり得ます。
-
-## 形式
-
-移植性の基準として、open specificationである [Agent Skills](https://agentskills.io/) の `SKILL.md` 形式を使用します。
-
-共通skillでは次の方針を守ります。
-
-- `name` と `description` は短くし、**何をするか**と**いつ使うか**を明確にする。
-- frontmatterは標準のAgent Skillsフィールドを優先する。
-- Hermes、Codex、Claude Code、Copilotなど、特定runtime専用のfrontmatter namespaceや記法を追加しない。
-- model名、reasoning tier、provider固有の癖を補正する指示を入れない。
-- runtime固有の配信、scheduler、tool、transport、installationの詳細を入れない。
-- root `SKILL.md` は必要なworkflowを選べる最小routerに寄せ、詳細は同一skill directory内のreferences/scriptsへprogressive disclosureする。
-- referencesやscriptsはskill directoryからの相対pathで参照し、**skill directory単体で意味が完結する**ようにする。
-
-最小構成:
-
-```markdown
----
-name: example-skill
-description: 何を行い、どのtaskで利用するかを短く記述する。
----
-
-# Example Skill
-
-このworkflowに固有で、model/runtimeをまたいでも変わらない知識とcontractを書く。
+```text
+skills/<name>/
+  SKILL.md
+  policies/
+    default.md
+  profiles/
+    openai/
+      gpt-6-astra.md
+  adapters/
+    claude-code.md
+  references/
+  scripts/
 ```
 
-## Skillに入れないもの
+この構造により、`skills/<name>/` directory単体を別runtimeへ持っていっても、そのskillに必要なsemantic core・working agreement・optional overlayをまとめて移せます。
 
-次は原則としてskillから分離します。
+### 責務
 
-- 「2ファイル以上なら必ずreview」など、個人・teamの運用判断 → `policies/`
-- 「必ず毎回全testを回す」「質問は最大N問」など、modelの挙動を矯正するための指示 → 必要なら `profiles/`
-- Claude Codeのworktree path、Codexのpermission記法、scheduler/chat delivery → `adapters/`
-- 時刻・障害ログ・特定PRの判断履歴 → issue/comment等のdurable record
+| Path | 役割 |
+| --- | --- |
+| `SKILL.md` | model/runtime非依存のdomain knowledge、workflow、contract |
+| `policies/` | このskillを使うときのuser/repository working agreement |
+| `profiles/` | exact model固有の最小behavior overlay |
+| `adapters/` | このskillに固有のruntime integration差分 |
+| `references/` | progressive disclosureする詳細知識 |
+| `scripts/` | deterministicに実行できる補助tool |
 
-## Runtimeとの責務境界
+## Root-level adapter
 
-runtime adapterは次を担当します。
+repository rootの `adapters/` は例外で、**runtime全体のdiscovery/deploy router** だけを置きます。
 
-- common policyをruntimeの常時instruction入口へ接続する
-- skillのinstall先やdiscovery方法
-- model profileのexact-match選択
-- scheduler/job、chat/thread delivery
-- runtime固有のtool名・permission記法
-- model/providerのpin方法
-- platform固有のcommandやAPI
+- skill directoryのinstall先
+- skill-local policy/profile/adapterをどう発見するか
+- global instruction入口への薄いrouter
 
-adapterはskillやpolicyのsemantic contractを変更せず、runtimeの実行手段へ変換します。
+task-specificなsemantic ruleはroot adapterへ持ち込みません。
+
+## SKILL.md
+
+移植性の基準として [Agent Skills](https://agentskills.io/) の `SKILL.md` 形式を使います。
+
+- `name` / `description` は短く、何をするskillか・いつ使うかを明確にする。
+- model名、provider固有の癖、runtime tool/pathをsemantic coreへ埋め込まない。
+- root `SKILL.md` はrouter/contractとして保ち、詳細はreferences/scriptsへ分ける。
+- skill-local policy/profile/adapterを参照する場合も、同一directory内のrelative pathで完結させる。
+
+## Overlay rules
+
+- `policies/default.md` はそのskillを利用するときのlocal working agreement。model/runtime名を含めない。
+- `profiles/` はexact model identityが一致するときだけ読む。unknown modelではprofileなし。
+- `adapters/` はruntime固有のtool/path/integrationだけを扱い、`SKILL.md` のsemantic contractを変更しない。
+- 同じruleをSKILL/policy/profile/adapterへ重複コピーしない。
+- incidentや特定PRの時系列はskill packageへ入れず、issue/comment等のdurable recordへ残す。
