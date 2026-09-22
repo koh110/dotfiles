@@ -28,4 +28,3 @@ entity単位endpointで利用できる形の例です。
 
 recommendation enumやfield recordの形式はAPI固有なので、live validatorまたはproject contractから確認してください。重要な不変条件は、すべてのentityの `updatableFields` が表現され、すべてのfield actionが明示的に `skip` となり、proposed valueのkeyを送らないことです。
 
-scheduled jobのfinal responseが同じchat threadをtargetにする場合、runtimeやchat adapterによってduplicate-target postが抑止されることがあります。final reportの前に追加で完全一致のcandidate messageをpostする必要がある場合は、adapterがdocumentしているseparate-send mechanismを使い、返されたmessage IDを確認してください。candidate bodyは変更しないでください。
