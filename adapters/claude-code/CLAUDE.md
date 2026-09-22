@@ -16,7 +16,7 @@ exact model profileが無い場合は近いmodelのprofileを推測適用しま�
 
 ## Common activation
 
-- application/code変更: `development-application`
+- application/code変更: `development-application`。完了前に `code-review/policies/default.md` のgateを評価し、該当する場合だけ `code-review` をloadする
 - git操作・repository内の編集: `git-workflow`
 - code review gateの判定/実行: `code-review`
 - 新規機能・architectureの仕様化: `spec-drilldown`
