@@ -1,6 +1,7 @@
-# Review policy
+# Code review policy
 
-このpolicyは **reviewをいつ必須にするか** と **qualified reviewerの条件** を定義します。reviewのseverity、input/output、finding adjudicationは `skills/code-review` のcontractを使います。
+このpolicyは `code-review` skillに紐づき、**いつ独立reviewを必須にするか** と **qualified reviewerの条件** を定義します。
+reviewのseverity、input/output、finding adjudicationは同directoryの `../SKILL.md` を使います。
 
 ## Mandatory review
 

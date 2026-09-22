@@ -1,5 +1,7 @@
 # Development policy
 
+このpolicyは `development-application` skillに紐づくworking agreementです。
+
 ## Scope and implementation choices
 
 - 明示されたPR target/baseがある場合はそれを起点にし、未指定の場合だけauthoritative remote metadataからdefault branchを解決する。

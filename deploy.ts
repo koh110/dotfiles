@@ -93,7 +93,7 @@ async function main() {
 }
 main().catch(console.error)
 
-const AGENT_RESOURCE_DIRS = ['skills', 'policies', 'profiles', 'adapters'] as const
+const AGENT_RESOURCE_DIRS = ['skills', 'adapters'] as const
 
 async function deployAgentResources(name: string, targetDirName: string) {
   console.log('copy: ' + name)
@@ -184,7 +184,7 @@ async function claude() {
   ])
   // manifest はportable resource以外のキー(claude/agents・hooks・settings.json等)を
   // 保持したままマージする。ここで書き込むのはmainが実際にdeployした
-  // skills/policies/profiles/adaptersの範囲だけで、他のmanaged keyは消さない。
+  // skills/adaptersの範囲だけで、他のmanaged keyは消さない。
   const manifest = await readManifest()
   for (const e of entries) {
     const h = await hashFile(e.src)

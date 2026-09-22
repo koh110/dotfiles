@@ -1,24 +1,26 @@
 # Global agent guidance
 
-このファイルはCodex向けの薄いrouterです。taskと無関係なpolicyやskillを先読みしないでください。
+このファイルはCodex向けの薄いdiscovery routerです。taskと無関係なskill packageを先読みしないでください。
 
-## Policies
+## Skill package loading
 
-必要な場合だけ次を読む:
+taskに該当する `~/.codex/skills/<skill>/SKILL.md` を使います。
 
-- application/code変更: `~/.codex/policies/development.md`
-- git操作・repository内の編集: `~/.codex/policies/git-workflow.md`
-- 独立reviewの要否・reviewer条件: `~/.codex/policies/review.md`
-- 新規機能・architectureの仕様化: `~/.codex/policies/specification.md`
+そのskill directoryに以下が存在する場合:
 
-## Skills
+- `policies/default.md`: このskillを使うときのworking agreementとして読む。
+- `profiles/<provider>/<exact-model>.md`: runtimeからexact active model identityが分かり、完全一致するfileがある場合だけ読む。
+- `adapters/codex.md`: Codex固有差分として読む。
 
-task-specificなdomain knowledge/workflowは `~/.codex/skills/` の該当skillを使う。Skillはpolicyやmodel behaviorの代替ではない。
+exact model profileが無い場合は近いmodelのprofileを推測適用しません。
 
-## Model profile
+## Common activation
 
-runtimeからexactなactive model identityが分かり、`~/.codex/profiles/` に完全一致するprofileがある場合だけ、そのprofileを追加overlayとして読む。完全一致しない場合はprofileを推測して適用しない。
+- application/code変更: `development-application`
+- git操作・repository内の編集: `git-workflow`
+- code review gateの判定/実行: `code-review`
+- 新規機能・architectureの仕様化: `spec-drilldown`
 
 ## Boundary
 
-Codex固有のpermission/tool挙動はこのadapter/runtime設定で扱い、portable skillへ書き戻さない。
+Codex固有のpermission/tool/discoveryだけをruntime adapterで扱い、portable `SKILL.md` へ書き戻しません。

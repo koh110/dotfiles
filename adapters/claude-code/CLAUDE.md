@@ -1,24 +1,26 @@
 # Global agent guidance
 
-このファイルはClaude Code向けの薄いrouterです。taskと無関係なpolicyやskillを先読みしないでください。
+このファイルはClaude Code向けの薄いdiscovery routerです。taskと無関係なskill packageを先読みしないでください。
 
-## Policies
+## Skill package loading
 
-必要な場合だけ次を読む:
+taskに該当する `~/.claude/skills/<skill>/SKILL.md` を使います。
 
-- application/code変更: `~/.claude/policies/development.md`
-- git操作・repository内の編集: `~/.claude/policies/git-workflow.md`
-- 独立reviewの要否・reviewer条件: `~/.claude/policies/review.md`
-- 新規機能・architectureの仕様化: `~/.claude/policies/specification.md`
+そのskill directoryに以下が存在する場合:
 
-## Skills
+- `policies/default.md`: このskillを使うときのworking agreementとして読む。
+- `profiles/<provider>/<exact-model>.md`: runtimeからexact active model identityが分かり、完全一致するfileがある場合だけ読む。
+- `adapters/claude-code.md`: Claude Code固有差分として読む。
 
-task-specificなdomain knowledge/workflowは `~/.claude/skills/` の該当skillを使う。Skillはpolicyやmodel behaviorの代替ではない。
+exact model profileが無い場合は近いmodelのprofileを推測適用しません。
 
-## Model profile
+## Common activation
 
-runtimeからexactなactive model identityが分かり、`~/.claude/profiles/` に完全一致するprofileがある場合だけ、そのprofileを追加overlayとして読む。完全一致しない場合はprofileを推測して適用しない。
+- application/code変更: `development-application`
+- git操作・repository内の編集: `git-workflow`
+- code review gateの判定/実行: `code-review`
+- 新規機能・architectureの仕様化: `spec-drilldown`
 
 ## Boundary
 
-Claude Code固有のworktree/tool/permission挙動はこのadapter/runtime設定で扱い、portable skillへ書き戻さない。既存linked worktreeのruntime差分は `~/.claude/adapters/claude-code/worktrees.md` を必要な場合だけ参照する。
+Claude Code固有のpermission/tool/worktree/discoveryだけをadapterで扱い、portable `SKILL.md` へ書き戻しません。
