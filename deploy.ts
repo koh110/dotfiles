@@ -112,8 +112,40 @@ async function deployAdapterInstruction(
   targetName: string
 ) {
   const targetDir = join(homedir(), targetDirName)
+  const targetPath = join(targetDir, targetName)
+  const sourceContent = await readFile(join(import.meta.dirname, source), 'utf8')
+  let targetContent = ''
+
   await mkdir(targetDir, { recursive: true })
-  await cp(join(import.meta.dirname, source), join(targetDir, targetName))
+  try {
+    targetContent = await readFile(targetPath, 'utf8')
+  } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+      throw error
+    }
+  }
+
+  const marker = `dotfiles managed ${source}`
+  await writeFile(targetPath, mergeManagedMarkdown(targetContent, sourceContent, marker))
+}
+
+function mergeManagedMarkdown(target: string, source: string, marker: string) {
+  const begin = `<!-- BEGIN ${marker} -->`
+  const end = `<!-- END ${marker} -->`
+  const beginIndex = target.indexOf(begin)
+  const endIndex = target.indexOf(end)
+
+  if ((beginIndex === -1) !== (endIndex === -1) || (beginIndex !== -1 && endIndex < beginIndex)) {
+    throw new Error(`invalid managed markdown block: ${marker}`)
+  }
+
+  let unmanaged = target
+  if (beginIndex !== -1) {
+    unmanaged = target.slice(0, beginIndex) + target.slice(endIndex + end.length)
+  }
+
+  const managed = [begin, source.trim(), end].join('\n')
+  return [managed, unmanaged.trim()].filter(Boolean).join('\n\n') + '\n'
 }
 
 async function deployCodexAgents() {
@@ -150,9 +182,9 @@ async function claude() {
     deployAgentResources('claude', '.claude'),
     deployAdapterInstruction('adapters/claude-code/CLAUDE.md', '.claude', 'CLAUDE.md'),
   ])
-  // manifest は skills/* 以外のキー(claude/agents・hooks・settings.json。dev branch の
-  // .worktree/mf 側で deploy された分)を保持したままマージする。ここで書き込むのは
-  // main が実際に deploy した skills/* の範囲のみで、他ブランチが書いたキーを消さない。
+  // manifest はportable resource以外のキー(claude/agents・hooks・settings.json等)を
+  // 保持したままマージする。ここで書き込むのはmainが実際にdeployした
+  // skills/policies/profiles/adaptersの範囲だけで、他のmanaged keyは消さない。
   const manifest = await readManifest()
   for (const e of entries) {
     const h = await hashFile(e.src)
@@ -199,8 +231,6 @@ async function claudeDeployEntries(): Promise<DeployEntry[]> {
       entries.push({ rel, src: f, dst: join(home, rel) })
     }
   }
-  const claudeMd = join(root, 'adapters', 'claude-code', 'CLAUDE.md')
-  entries.push({ rel: 'CLAUDE.md', src: claudeMd, dst: join(home, 'CLAUDE.md') })
   return entries
 }
 
