@@ -3,6 +3,16 @@ name: development-application
 description: 'アプリケーション実装で、実装手段の選択、I/O、test infrastructure、monorepo、platform制約、DB/API設計を検討するときに使う。'
 ---
 
+## Package overlays
+
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
+
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
+
+
 # Development Application
 
 このskillはmodel/runtimeをまたいで再利用できるengineering knowledgeを定義します。reviewを必須にする条件、仕様書を必須にする条件、compatibility方針、質問/停止条件、完了時の検証範囲などのworking agreementはこのskillでは定義しません。

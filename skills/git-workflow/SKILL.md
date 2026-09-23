@@ -3,6 +3,16 @@ name: git-workflow
 description: 'Git repositoryでcontext確認、branch/worktree、commit/rebase/push、conflict、cleanupを安全に行うときに使う。'
 ---
 
+## Package overlays
+
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
+
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
+
+
 # Git Workflow
 
 このskillはGit操作そのもののportableな安全contractを定義します。

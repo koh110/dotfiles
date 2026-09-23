@@ -33,17 +33,11 @@ skills/<name>/
 | `references/` | progressive disclosureする詳細知識 |
 | `scripts/` | deterministicに実行できる補助tool |
 
-## Adapter deployment
+## Deployment
 
-adapterのsource of truthも各skill directoryに置きます。
+deployment側はskill packageの内部構造を解釈しません。従来どおり `skills/` directoryをruntimeのskill directoryへそのままcopyします。
 
-`deploy.ts` は `skills/*/adapters/<runtime>.md` を列挙し、runtimeのglobal instruction fileにmanaged blockとして集約します。したがって、rootに手書きのadapter instructionを持ちません。
-
-- source of truth: `skills/<name>/adapters/<runtime>.md`
-- generated destination: runtimeの `AGENTS.md` / `CLAUDE.md` 等
-- deploy codeはadapter本文を所有せず、収集・配置だけを行う
-
-これによりskill directory単体でpolicy/profile/adapterまで持ち運べます。
+policy/profile/adapterの読み分けは各 `SKILL.md` のpackage-local規約で行います。そのため、新しいlayerを追加してもdeploy scriptへruntime別の集約処理を追加しません。
 
 ## SKILL.md
 
@@ -53,6 +47,7 @@ adapterのsource of truthも各skill directoryに置きます。
 - model名、provider固有の癖、runtime tool/pathをsemantic coreへ埋め込まない。
 - root `SKILL.md` はrouter/contractとして保ち、詳細はreferences/scriptsへ分ける。
 - skill-local policy/profile/adapterを参照する場合も、同一directory内のrelative pathで完結させる。
+- `policies/default.md` は存在すればloadし、adapter/profileはcurrent runtime / exact modelに一致するものだけをloadする。
 
 ## Overlay rules
 

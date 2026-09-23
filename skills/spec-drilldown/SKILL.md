@@ -3,6 +3,16 @@ name: spec-drilldown
 description: '新規機能やarchitectureの実装前に、materialな曖昧さを解消し、実装可能なcanonical specificationを作るときに使う。明確なbugfixや既に十分な仕様があるtaskでは使わない。'
 ---
 
+## Package overlays
+
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
+
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
+
+
 # Spec Drilldown
 
 ## Goal
