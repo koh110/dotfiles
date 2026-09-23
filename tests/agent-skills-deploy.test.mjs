@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   SkillDeployConflictError,
+  deployAgentSkills,
   deploySkillsSnapshot,
   reconcileRuntimeSkills,
 } from '../lib/agent-skills.mjs'
@@ -116,4 +117,32 @@ test('remove mode does not create an empty legacy runtime directory', async (t) 
   })
 
   await assert.rejects(() => lstat(runtimeSkillsDir), /ENOENT/)
+})
+
+
+test('high-level deploy is idempotent for Claude compatibility symlinks', async (t) => {
+  const f = await fixture()
+  t.after(() => rm(f.root, { recursive: true, force: true }))
+
+  const first = await deployAgentSkills({
+    sourceDir: f.sourceDir,
+    homeDir: f.root,
+    runtimes: ['claude', 'codex', 'copilot'],
+  })
+  assert.equal(first, true)
+
+  const claudeSkill = join(f.root, '.claude', 'skills', 'example')
+  assert.equal((await lstat(claudeSkill)).isSymbolicLink(), true)
+  assert.equal(
+    await realpath(claudeSkill),
+    await realpath(join(f.root, '.agents', 'skills', 'example')),
+  )
+
+  const second = await deployAgentSkills({
+    sourceDir: f.sourceDir,
+    homeDir: f.root,
+    runtimes: ['claude', 'codex', 'copilot'],
+    check: true,
+  })
+  assert.equal(second, true)
 })
