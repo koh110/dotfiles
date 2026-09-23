@@ -93,86 +93,13 @@ async function main() {
 }
 main().catch(console.error)
 
-const AGENT_RESOURCE_DIRS = ['skills'] as const
-
-async function deployAgentResources(name: string, targetDirName: string) {
+async function deploySkills(name: string, targetDirName: string) {
   console.log('copy: ' + name)
   const targetDir = join(homedir(), targetDirName)
   await mkdir(targetDir, { recursive: true })
-  for (const dir of AGENT_RESOURCE_DIRS) {
-    await cp(join(import.meta.dirname, dir), join(targetDir, dir), {
-      recursive: true
-    })
-  }
-}
-
-async function deployRuntimeSkillAdapters(
-  runtime: string,
-  targetDirName: string,
-  targetName: string
-) {
-  const targetDir = join(homedir(), targetDirName)
-  const targetPath = join(targetDir, targetName)
-  const sourceContent = await collectSkillAdapters(runtime)
-  let targetContent = ''
-
-  await mkdir(targetDir, { recursive: true })
-  try {
-    targetContent = await readFile(targetPath, 'utf8')
-  } catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
-      throw error
-    }
-  }
-
-  const marker = `dotfiles managed skill adapters ${runtime}`
-  await writeFile(targetPath, mergeManagedMarkdown(targetContent, sourceContent, marker))
-}
-
-async function collectSkillAdapters(runtime: string) {
-  const skillsDir = join(import.meta.dirname, 'skills')
-  const skillNames = (await readdir(skillsDir, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort()
-
-  const fragments: string[] = []
-  for (const skillName of skillNames) {
-    const adapterPath = join(skillsDir, skillName, 'adapters', `${runtime}.md`)
-    try {
-      const content = await readFile(adapterPath, 'utf8')
-      fragments.push(`## Skill package: ${skillName}\n\n${content.trim()}`)
-    } catch (error) {
-      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
-        throw error
-      }
-    }
-  }
-
-  return [
-    '# Managed skill adapters',
-    'The sections below are generated from skills/*/adapters and should not be edited here.',
-    ...fragments,
-  ].join('\n\n')
-}
-
-function mergeManagedMarkdown(target: string, source: string, marker: string) {
-  const begin = `<!-- BEGIN ${marker} -->`
-  const end = `<!-- END ${marker} -->`
-  const beginIndex = target.indexOf(begin)
-  const endIndex = target.indexOf(end)
-
-  if ((beginIndex === -1) !== (endIndex === -1) || (beginIndex !== -1 && endIndex < beginIndex)) {
-    throw new Error(`invalid managed markdown block: ${marker}`)
-  }
-
-  let unmanaged = target
-  if (beginIndex !== -1) {
-    unmanaged = target.slice(0, beginIndex) + target.slice(endIndex + end.length)
-  }
-
-  const managed = [begin, source.trim(), end].join('\n')
-  return [managed, unmanaged.trim()].filter(Boolean).join('\n\n') + '\n'
+  await cp(join(import.meta.dirname, 'skills'), join(targetDir, 'skills'), {
+    recursive: true
+  })
 }
 
 async function deployCodexAgents() {
@@ -185,7 +112,7 @@ async function deployCodexAgents() {
 }
 
 async function copilot() {
-  await deployAgentResources('copilot', '.copilot')
+  await deploySkills('copilot', '.copilot')
 }
 
 async function claude() {
@@ -205,13 +132,10 @@ async function claude() {
     process.exitCode = 1
     return
   }
-  await Promise.all([
-    deployAgentResources('claude', '.claude'),
-    deployRuntimeSkillAdapters('claude-code', '.claude', 'CLAUDE.md'),
-  ])
-  // manifest はportable resource以外のキー(claude/agents・hooks・settings.json等)を
-  // 保持したままマージする。ここで書き込むのはmainが実際にdeployした
-  // skills/の範囲だけで、他のmanaged keyは消さない。
+  await deploySkills('claude', '.claude')
+  // manifest は skills/* 以外のキー(claude/agents・hooks・settings.json。dev branch の
+  // .worktree/mf 側で deploy された分)を保持したままマージする。ここで書き込むのは
+  // main が実際に deploy した skills/* の範囲のみで、他ブランチが書いたキーを消さない。
   const manifest = await readManifest()
   for (const e of entries) {
     const h = await hashFile(e.src)
@@ -246,17 +170,15 @@ async function hashFile(path: string): Promise<string | null> {
   }
 }
 
-// main branch の claude() はportable agent resourcesとglobal routerだけをdeployする。
-// agents/hooks/settings.json は .worktree/mf (dev branch) 側の責務とする。
+// main branch の claude() は skills/ のみを deploy する（agents/hooks/settings.json は
+// .worktree/mf (dev branch) にのみ存在し、この worktree では扱わない）。
 async function claudeDeployEntries(): Promise<DeployEntry[]> {
   const home = join(homedir(), '.claude')
   const root = import.meta.dirname
   const entries: DeployEntry[] = []
-  for (const dir of AGENT_RESOURCE_DIRS) {
-    for (const f of await listFiles(join(root, dir))) {
-      const rel = join(dir, relative(join(root, dir), f))
-      entries.push({ rel, src: f, dst: join(home, rel) })
-    }
+  for (const f of await listFiles(join(root, 'skills'))) {
+    const rel = join('skills', relative(join(root, 'skills'), f))
+    entries.push({ rel, src: f, dst: join(home, rel) })
   }
   return entries
 }
@@ -317,8 +239,7 @@ function reportDrift(drift: { rel: string; reason: string }[]) {
 
 async function codex() {
   await Promise.all([
-    deployAgentResources('codex', '.codex'),
-    deployRuntimeSkillAdapters('codex', '.codex', 'AGENTS.md'),
+    deploySkills('codex', '.codex'),
     deployCodexAgents(),
     deployCodexConfig(
       join(import.meta.dirname, '.codex/config.toml'),

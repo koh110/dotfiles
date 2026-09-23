@@ -5,6 +5,16 @@ version: 1.1.0
 license: MIT
 ---
 
+## Package overlays
+
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
+
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
+
+
 # Code Review
 
 実装コードのレビュー契約とpre-commit品質ゲートを定義する、クロスエージェント共通の正本。特定のagent、CLI、provider、model名に依存しない。runtime固有の実行方法はadapter側でこの契約へ変換する。
