@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: 'コード差分を独立レビューし、品質ゲート、finding判定、修正後closureを実行するときに使う。'
+description: '実装・refactoring・bugfix後やcommit/push前にreview要否を判定し、必要な場合はコード差分の独立レビュー、品質ゲート、finding判定、修正後closureを実行するときに使う。'
 version: 1.1.0
 license: MIT
 ---
