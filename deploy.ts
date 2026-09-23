@@ -106,7 +106,10 @@ async function main() {
     (values.all || values.codex) && codex(),
   ])
 }
-main().catch(console.error)
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})
 
 async function deployCanonicalSkills() {
   try {
@@ -234,7 +237,7 @@ async function listFiles(dir: string): Promise<string[]> {
   for (const d of entries) {
     const p = join(dir, d.name)
     if (d.isDirectory()) out.push(...(await listFiles(p)))
-    else if (d.isFile()) out.push(p)
+    else if (d.isFile() || d.isSymbolicLink()) out.push(p)
   }
   return out
 }
