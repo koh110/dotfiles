@@ -30,6 +30,7 @@ test('snapshot deploy preserves unrelated skills and accepts source updates', as
   await deploySkillsSnapshot(f)
   assert.equal(await readFile(join(f.targetDir, 'example', 'SKILL.md'), 'utf8'), '# v1\n')
   assert.equal(await readFile(join(f.targetDir, 'third-party', 'SKILL.md'), 'utf8'), '# keep\n')
+  await assert.rejects(() => lstat(join(f.targetDir, 'README.md')), /ENOENT/)
 
   await writeFile(join(f.sourceDir, 'example', 'SKILL.md'), '# v2\n')
   await deploySkillsSnapshot(f)
@@ -98,4 +99,21 @@ test('Claude migration replaces managed copy with symlink to canonical snapshot'
     await realpath(join(runtimeSkillsDir, 'example')),
     await realpath(join(f.targetDir, 'example')),
   )
+})
+
+
+test('remove mode does not create an empty legacy runtime directory', async (t) => {
+  const f = await fixture()
+  t.after(() => rm(f.root, { recursive: true, force: true }))
+  await deploySkillsSnapshot(f)
+
+  const runtimeSkillsDir = join(f.root, '.copilot', 'skills')
+  await reconcileRuntimeSkills({
+    canonicalDir: f.targetDir,
+    runtimeSkillsDir,
+    mode: 'remove',
+    replaceRealEntries: true,
+  })
+
+  await assert.rejects(() => lstat(runtimeSkillsDir), /ENOENT/)
 })
