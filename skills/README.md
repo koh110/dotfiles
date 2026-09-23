@@ -35,9 +35,26 @@ skills/<name>/
 
 ## Deployment
 
-deployment側はskill packageの内部構造を解釈しません。従来どおり `skills/` directoryをruntimeのskill directoryへそのままcopyします。
+Git repositoryの `skills/` はsource of truth、`~/.agents/skills` はruntime-visibleなinstalled snapshotとして分離します。
 
-policy/profile/adapterの読み分けは各 `SKILL.md` のpackage-local規約で行います。そのため、新しいlayerを追加してもdeploy scriptへruntime別の集約処理を追加しません。
+```text
+dotfiles/skills/
+      |
+      | deploy: real file copy
+      v
+~/.agents/skills/
+      |
+      +-- Codex / Copilot: native discovery
+      `-- Claude Code: ~/.claude/skills/<name> -> ~/.agents/skills/<name>
+```
+
+- sourceを直接symlinkせず、deploy時点のsnapshotを実ファイルとして配置する。
+- dotfilesが管理するtop-level entryだけを更新し、`~/.agents/skills` に別途導入された第三者skillは残す。
+- installed snapshotのhashをmanifestへ記録し、deploy後の手編集を次回deployで検出する。
+- source側の更新は通常のdeployとして反映し、installed側だけ変更されている場合はfail-closedにする。
+- Codex / Copilotの旧runtime別copyは退役させ、Claude Codeだけcompatibility symlinkを持つ。
+
+deploymentはskill package内部のpolicy/profile/adapterの意味を解釈しません。読み分けは各 `SKILL.md` のpackage-local規約で行います。
 
 ## SKILL.md
 
