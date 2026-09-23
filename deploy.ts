@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ./deploy.ts --all | --claude [--check|--force]  (--check/--force は --claude の drift ガード専用)
+// ./deploy.ts --all | --claude [--check|--force]  (--check は --claude の drift guard、--force は managed skill の上書き許可)
 
 import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -8,6 +8,11 @@ import { createHash } from 'node:crypto'
 import { parseArgs } from 'node:util'
 import { deployDotfile } from './lib/dotfile-template.ts'
 import { deployCodexConfig } from './lib/codex-config.ts'
+import {
+  SkillDeployConflictError,
+  deploySkillsSnapshot,
+  reconcileRuntimeSkills,
+} from './lib/agent-skills.mjs'
 
 const { values } = parseArgs({
   options: {
@@ -69,16 +74,26 @@ const { values } = parseArgs({
   }
 })
 
+const SKILLS_SOURCE_DIR = join(import.meta.dirname, 'skills')
+const AGENTS_ROOT = join(homedir(), '.agents')
+const AGENT_SKILLS_DIR = join(AGENTS_ROOT, 'skills')
+const AGENT_SKILLS_MANIFEST = join(AGENTS_ROOT, '.dotfiles-skills-manifest.json')
+
 async function main() {
   if (values.check) {
     if (!values.claude) {
-      console.error('--check は --claude 専用です: npx tsx deploy.ts --claude --check')
+      console.error('--check は --claude 専用です: node deploy.ts --claude --check')
       process.exitCode = 1
       return
     }
-    await claude() // --check 時は他ターゲットを一切実行しない（--all 併用でも claude の drift 報告のみ）
+    if (!await checkCanonicalSkills()) return
+    await claude()
     return
   }
+
+  const deployAgentSkills = values.all || values.copilot || values.claude || values.codex
+  if (deployAgentSkills && !await deployCanonicalSkills()) return
+
   await Promise.all([
     (values.all || values.ssh) && ssh(),
     (values.all || values.git) && git(),
@@ -93,13 +108,53 @@ async function main() {
 }
 main().catch(console.error)
 
-async function deploySkills(name: string, targetDirName: string) {
-  console.log('copy: ' + name)
-  const targetDir = join(homedir(), targetDirName)
-  await mkdir(targetDir, { recursive: true })
-  await cp(join(import.meta.dirname, 'skills'), join(targetDir, 'skills'), {
-    recursive: true
-  })
+async function deployCanonicalSkills() {
+  try {
+    await deploySkillsSnapshot({
+      sourceDir: SKILLS_SOURCE_DIR,
+      targetDir: AGENT_SKILLS_DIR,
+      manifestPath: AGENT_SKILLS_MANIFEST,
+      force: values.force,
+    })
+    console.log('copy: agent skills -> ~/.agents/skills')
+    return true
+  } catch (error) {
+    if (error instanceof SkillDeployConflictError) {
+      reportSkillConflicts('agent skills deploy conflict:', error.conflicts)
+      process.exitCode = 1
+      return false
+    }
+    throw error
+  }
+}
+
+async function checkCanonicalSkills() {
+  try {
+    await deploySkillsSnapshot({
+      sourceDir: SKILLS_SOURCE_DIR,
+      targetDir: AGENT_SKILLS_DIR,
+      manifestPath: AGENT_SKILLS_MANIFEST,
+      check: true,
+    })
+    return true
+  } catch (error) {
+    if (error instanceof SkillDeployConflictError) {
+      reportSkillConflicts('agent skills drift detected:', error.conflicts)
+      process.exitCode = 1
+      return false
+    }
+    throw error
+  }
+}
+
+function reportSkillConflicts(title: string, conflicts: { path: string; reason: string }[]) {
+  console.error(title)
+  for (const conflict of conflicts) {
+    console.error(`  ${conflict.path}: ${conflict.reason}`)
+  }
+  console.error('')
+  console.error('source of truth は dotfiles/skills です。installed snapshot の変更を残す場合は source へ反映し、')
+  console.error('破棄してよい変更だけ --force で上書きしてください。')
 }
 
 async function deployCodexAgents() {
@@ -112,36 +167,50 @@ async function deployCodexAgents() {
 }
 
 async function copilot() {
-  await deploySkills('copilot', '.copilot')
+  await reconcileRuntimeSkills({
+    canonicalDir: AGENT_SKILLS_DIR,
+    runtimeSkillsDir: join(homedir(), '.copilot', 'skills'),
+    mode: 'remove',
+    force: true,
+    replaceRealEntries: true,
+  })
+  console.log('skills: copilot uses ~/.agents/skills')
 }
 
 async function claude() {
   const entries = await claudeDeployEntries()
   const drift = await detectClaudeDrift(entries)
-  if (values.check) {
-    if (drift.length > 0) {
-      reportDrift(drift)
-      process.exitCode = 1
-    } else {
-      console.log('claude deploy: no drift')
-    }
-    return
-  }
   if (drift.length > 0 && !values.force) {
     reportDrift(drift)
     process.exitCode = 1
     return
   }
-  await deploySkills('claude', '.claude')
-  // manifest は skills/* 以外のキー(claude/agents・hooks・settings.json。dev branch の
-  // .worktree/mf 側で deploy された分)を保持したままマージする。ここで書き込むのは
-  // main が実際に deploy した skills/* の範囲のみで、他ブランチが書いたキーを消さない。
-  const manifest = await readManifest()
-  for (const e of entries) {
-    const h = await hashFile(e.src)
-    if (h !== null) manifest[e.rel] = h
+
+  try {
+    await reconcileRuntimeSkills({
+      canonicalDir: AGENT_SKILLS_DIR,
+      runtimeSkillsDir: join(homedir(), '.claude', 'skills'),
+      mode: 'symlink',
+      force: values.force,
+      replaceRealEntries: true,
+      check: values.check,
+    })
+  } catch (error) {
+    if (error instanceof SkillDeployConflictError) {
+      reportSkillConflicts('claude skill migration conflict:', error.conflicts)
+      process.exitCode = 1
+      return
+    }
+    throw error
   }
-  await writeFile(CLAUDE_MANIFEST, JSON.stringify(manifest, null, 2) + '\n')
+
+  if (values.check) {
+    console.log('claude deploy: no drift')
+    return
+  }
+
+  await clearClaudeSkillManifest()
+  console.log('link: ~/.claude/skills/* -> ~/.agents/skills/*')
 }
 
 const CLAUDE_MANIFEST = join(homedir(), '.claude', '.deploy-manifest.json')
@@ -154,7 +223,15 @@ interface DeployEntry {
 
 async function listFiles(dir: string): Promise<string[]> {
   const out: string[] = []
-  for (const d of await readdir(dir, { withFileTypes: true })) {
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return out
+    throw error
+  }
+
+  for (const d of entries) {
     const p = join(dir, d.name)
     if (d.isDirectory()) out.push(...(await listFiles(p)))
     else if (d.isFile()) out.push(p)
@@ -220,26 +297,62 @@ async function detectClaudeDrift(
       drift.push({ rel: e.rel, reason: 'manifest 未記録かつ worktree 正本と内容が異なる（由来不明の drift）' })
     }
   }
+
+  // 旧copy配下に、現在のsourceにも過去manifestにも存在しないfileがあれば
+  // symlink移行時に消してよい根拠がないためdriftとして扱う。
+  const sourceRels = new Set(entries.map((entry) => entry.rel))
+  const legacySkillsDir = join(homedir(), '.claude', 'skills')
+  for (const file of await listFiles(legacySkillsDir)) {
+    const rel = join('skills', relative(legacySkillsDir, file))
+    if (sourceRels.has(rel)) continue
+
+    const currentHash = await hashFile(file)
+    const recorded = manifest[rel]
+    if (recorded === undefined) {
+      drift.push({ rel, reason: '旧 ~/.claude/skills 配下に由来不明のfileがある' })
+    } else if (currentHash !== recorded) {
+      drift.push({ rel, reason: 'sourceから削除済みだが旧deploy後に変更されたfileがある' })
+    }
+  }
+
   return drift
 }
 
 function reportDrift(drift: { rel: string; reason: string }[]) {
-  console.error('claude deploy drift detected:')
+  console.error('claude legacy skill drift detected:')
   for (const d of drift) {
     console.error(`  ~/.claude/${d.rel}: ${d.reason}`)
   }
   console.error('')
-  console.error('deploy は ~/.claude 側の上記変更を無言で上書きします。次のいずれかで解消してください:')
-  console.error('  1. 残すべき変更の場合: diff を確認し、~/.claude 側の内容を worktree 正本へ byte 同一に')
-  console.error('     コピーする（cp ~/.claude/<上記rel> <worktree の対応 src>）。同期後は --force 不要で deploy が通る。')
-  console.error('  2. worktree 側へ意味的に取り込み済みで byte が異なる場合（settings.json のキー順差等）:')
-  console.error('     当該変更が正本に反映済みであることを diff で確認した上で --force で上書きする。')
-  console.error('  3. ~/.claude 側の変更を破棄してよい場合のみ、そのまま --force で上書きする。')
+  console.error('旧 ~/.claude/skills の変更を残す場合は dotfiles/skills へ反映してください。')
+  console.error('破棄してよい変更だけ --force でsymlink移行してください。')
+}
+
+async function clearClaudeSkillManifest() {
+  const manifest = await readManifest()
+  let changed = false
+  for (const key of Object.keys(manifest)) {
+    if (key === 'skills' || key.startsWith('skills/') || key.startsWith('skills\\')) {
+      delete manifest[key]
+      changed = true
+    }
+  }
+  if (changed) {
+    await writeFile(CLAUDE_MANIFEST, JSON.stringify(manifest, null, 2) + '\n')
+  }
 }
 
 async function codex() {
+  await reconcileRuntimeSkills({
+    canonicalDir: AGENT_SKILLS_DIR,
+    runtimeSkillsDir: join(homedir(), '.codex', 'skills'),
+    mode: 'remove',
+    force: true,
+    replaceRealEntries: true,
+  })
+  console.log('skills: codex uses ~/.agents/skills')
+
   await Promise.all([
-    deploySkills('codex', '.codex'),
     deployCodexAgents(),
     deployCodexConfig(
       join(import.meta.dirname, '.codex/config.toml'),
