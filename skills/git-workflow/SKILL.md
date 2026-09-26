@@ -1,22 +1,35 @@
 ---
 name: git-workflow
-description: 'TRIGGER when: git repository で状態確認、branch 作成、差分確認、commit、rebase、push、worktree 作成、cleanup などの git 操作全般を行うとき、またはその repository 配下でソースコードやドキュメント(設計docなど、後で commit や review の対象になりうる成果物)を新規作成・編集するとき。既存の linked worktree を再利用し、root checkout にいる場合だけ repository root 配下の `.worktree/` に専用 worktree を作成して、編集・test・lint・build・commit を完結させる。'
+description: 'Git repositoryでcontext確認、branch/worktree、commit/rebase/push、conflict、cleanupを安全に行うときに使う。'
 ---
 
-## General Guidelines
+## Package overlays
 
-- 最初に repository root、Git dir、common Git dir、branch、working tree、worktree 一覧を確認する
-- repository root checkout を feature / fix / refactor / chore の継続的な作業場所として利用しない
-- この skill における「コード変更」は、ソースコードに限らず、`docs/` 配下の設計ドキュメントなど、後で commit や review の対象になりうる成果物の作成・編集を含む。「ドキュメントだけだから root checkout のままでよい」とは判断しない
-- コード変更を伴う作業では、現在地が linked worktree ならその worktree を再利用し、root checkout なら専用 worktree を作成する
-- linked worktree 内で新しい worktree を入れ子に作成しない
-- `git status`, `git diff`, branch 名を確認せずに commit / rebase / push / cleanup を行わない
-- destructive な git 操作は、対象 path と復元手段を確認してから実行する
-- main checkout に feature 変更を残したまま完了扱いにしない
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
 
-## Worktree Context Detection
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
 
-Git 操作や編集を始める前に、以下を実行する。
+
+# Git Workflow
+
+このskillはGit操作そのもののportableな安全contractを定義します。
+
+次はこのskillの責務ではありません。
+
+- root checkoutを作業場所にしてよいか
+- worktreeを必須にするか、どのdirectoryへ置くか
+- branch naming convention
+- commit署名失敗時にunsigned commitを許可するか
+- 既存PRを別branchへ分割してよいか
+
+それらはrepository/user policyまたはruntime adapterで決めます。
+
+## Inspect context
+
+Git操作の前に、少なくとも次を確認します。
 
 ```bash
 repo_root=$(git rev-parse --show-toplevel)
@@ -27,64 +40,17 @@ git status --short
 git worktree list
 ```
 
-- sessionが `.worktree/<name>/` 以下から起動されている場合も、repository root ではなく起動中の linked worktree を作業場所として扱う。`git_dir != common_dir` であることを確認できたら、共有 `.git` への書き込みを要する `git worktree add` は実行しない
-- `git_dir != common_dir`: linked worktree 内にいる。agent、IDE、automation、または手動の Git 操作で作成された worktree を含む。作成元にかかわらず現在の worktree を専用作業場所として再利用し、新しい worktree を作成しない
-- `git_dir == common_dir`: root checkout にいる。コード変更なら `.worktree/` 配下に専用 worktree を作成して移動する
-- 判定結果と実際の `git worktree list` が矛盾する場合は編集を始めず、path 解決と Git 状態を再確認する
+- `git_dir != common_dir`: linked worktree内にいる。
+- `git_dir == common_dir`: primary/root checkoutにいる。
+- worktreeのpathや作成元（human、IDE、agent harness）から状態を推測せず、Git metadataをauthoritativeにする。
+- 判定と `git worktree list` が矛盾する場合はwrite operationを止め、path/Git stateを再確認する。
 
-## Branch Guidelines
+## Resolve the target base
 
-- branch 名は作業内容と一致させる
-  - `feature/<short-name>`
-  - `fix/<short-name>`
-  - `chore/<short-name>`
-- branch を切る前に現在 branch と working tree の状態を確認する
-- dirty な root checkout を、そのまま正規の作業場所だとみなさない
-- linked worktree が detached HEAD の場合、変更前に専用 branch を作ることを原則とする
-- 利用中の agent やツールが detached HEAD のまま編集を開始する場合も、最初の commit より前に専用 branch を作る
-- detached HEAD のまま commit / rebase / push を行わない
-
-## Worktree Guidelines
-
-- linked worktree 内にいる場合は、現在の worktree をそのタスクの専用作業場所として使う
-- root checkout にいる場合だけ、repository root に `.worktree/` ディレクトリを配置し、その配下に専用 worktree を作る
-- worktree 名と branch 名は作業内容に揃える
-  - 例: `.worktree/feature-api-cache` = `feature/api-cache`
-  - 例: `.worktree/fix-login-timeout` = `fix/login-timeout`
-- test / lint / build / commit は作業中の worktree 内で実行する
-- root checkout の `git status` に `.worktree/` が出る場合は、放置せず local exclude などで隠す
-- 誤って root checkout で変更を始めた場合も、そのまま続けず worktree へ移植して root checkout を戻す
-
-## Existing Linked Worktree Guidelines
-
-- `git_dir != common_dir` なら `git worktree add` を実行しない
-- **harness(Claude Code)が事前に用意した worktree(`.claude/worktrees/<name>/` 等)も、手動・agent作成の worktree と同様に既存の linked worktree として扱う**。「規約に沿っていないのでは」と疑って独自の `.worktree/` を新設しない。harness提供のworktreeか手動作成かで扱いを変える必要はなく、`git_dir != common_dir` である以上は現在の worktree をそのまま再利用する
-- 現在の worktree の path、branch、status を確認し、そのタスク専用として安全に利用できることを確認する
-- 既に適切な専用 branch にいる場合は、その branch と worktree をそのまま使う
-- detached HEAD で未変更なら、原則として編集前に専用 branch を作る
-- detached HEAD で既に変更がある場合は変更を保持したまま専用 branch を作り、status と diff が維持されていることを確認する
-
-```bash
-git switch -c feature/short-name
-git branch --show-current
-git status --short
-```
-
-## Worktree Creation Guidelines
-
-- この手順は `git_dir == common_dir` の root checkout にいる場合だけ実行する
-- コード変更を伴う作業では、`git worktree list` と `git status --short` を確認してから worktree を作る
-- repository root に `.worktree/` がなければ作る
-- PRを作成する場合は、先にPRのtarget/base branchを確定する。明示された既存branchを優先し、未指定ならremoteのdefault branchをauthoritative metadataから解決する（通常は`main`、存在しなければ`master`等。名前を推測しない）
-- 確定したtarget branchがremoteに存在することを確認し、そのexact refとOIDをfetchしてstart pointにする。作業branchを`main`へ固定したり、targetと異なるbranchから切ったりしない
-- `.worktree/` 配下へ専用 worktree を作り、移動してから編集を始める
+branch/worktreeを新規作成する場合、PR target/baseが明示されていればそれを使います。未指定の場合だけremote defaultをauthoritative metadataから解決します。
 
 ```bash
 set -euo pipefail
-git worktree list
-git status --short
-# PRのtarget/baseが明示されている場合はそれを設定する。
-# 未指定の場合だけremote defaultを解決する。
 target_branch="${PR_TARGET_BRANCH:-}"
 if test -z "$target_branch"; then
   remote_meta=$(git ls-remote --symref origin HEAD)
@@ -98,106 +64,97 @@ target_oid=$(git ls-remote origin "$target_full_ref" | awk 'NR == 1 { print $1 }
 test -n "$target_oid"
 git fetch --no-tags origin "$target_full_ref"
 test "$(git rev-parse FETCH_HEAD)" = "$target_oid"
-printf 'PR target: %s (%s)\n' "$target_branch" "$target_oid"
-mkdir -p .worktree
-git worktree add .worktree/feature-short-name -b feature/short-name "$target_oid"
-cd .worktree/feature-short-name
-git rev-parse --show-toplevel
-git branch --show-current
 ```
 
-## Root Checkout Recovery Guidelines
+`main` / `master` をguessしてbaseにしません。
 
-- root checkout での追加編集を止める
-- 上記のauthoritative remote HEAD解決手順で正しいbranch/worktreeを作る
-- shared stash stackは全worktree/processで共有されるため、無条件の`git stash pop`による移植は禁止する
-- tracked変更は権限を制限した一時patchへ書き、target側で`git apply --check`後に適用する
-- untracked fileはNUL区切り一覧を確認し、targetに既存pathがないものだけ明示的に移す
-- targetで差分を検証するまでroot checkout側の変更を削除しない。移植後もroot側cleanupは別の明示的手順として行う
-- root checkoutはfeature完了まで作業場所として使わない
+## Linked worktree semantics
+
+linked worktreeはpathやruntimeに関係なく同じGit semanticsとして扱います。
+
+- current worktreeを使う場合はpath、branch、statusを確認する。
+- detached HEADでcommitが必要なら、commit前に明示的なbranchを作る。
+- linked worktree内から別worktreeを作る必要がある場合、shared common Git dirへ変更が入ることを理解した上で行う。policyが現在のworktree再利用を要求する場合はそちらに従う。
+- `git worktree add` の作成先pathはpolicy/runtimeが決める。skillでは固定directory名を要求しない。
+
+新規worktreeを作るportableな形:
 
 ```bash
 set -euo pipefail
-# 上の手順でtarget_oidを確定済みのroot checkoutから
+test -n "$target_oid"
+test -n "$worktree_path"
+test -n "$new_branch"
+git worktree add "$worktree_path" -b "$new_branch" "$target_oid"
+git -C "$worktree_path" status --short
+git -C "$worktree_path" branch --show-current
+```
+
+## Detached HEAD
+
+変更前またはcommit前にbranchが必要なら:
+
+```bash
+git switch -c <branch-name>
+git branch --show-current
+git status --short
+```
+
+既存変更がある場合、branch作成後にstatus/diffが保持されていることを確認します。
+
+## Recover edits from the wrong checkout
+
+shared stash stackは複数worktree/processで共有されるため、移植元を特定せず `git stash pop` しません。
+
+tracked変更は一時patchへ保存し、targetでcheckしてからapplyします。
+
+```bash
+set -euo pipefail
 umask 077
 patch_file=$(mktemp)
 untracked_file=$(mktemp)
 git diff --binary HEAD > "$patch_file"
 git ls-files -z --others --exclude-standard > "$untracked_file"
-git worktree add .worktree/feature-short-name -b feature/short-name "$target_oid"
-git -C .worktree/feature-short-name apply --check "$patch_file"
-git -C .worktree/feature-short-name apply "$patch_file"
-# untracked_fileをNUL対応toolでレビューし、衝突しないfileだけ個別にcopyする
-git -C .worktree/feature-short-name status --short
-git status --short  # まだ原本を保持していることを確認
+
+git -C "$worktree_path" apply --check "$patch_file"
+git -C "$worktree_path" apply "$patch_file"
+git -C "$worktree_path" status --short
+git status --short
 ```
 
-一時fileはtargetとrootの検証完了後に削除する。自動移植が必要なら`fail-closed-automation`を適用し、artifact ownershipとconcurrent writerを別途扱う。
+- untracked filesはNUL-safeに列挙し、targetに同名pathがないことを確認して個別に移す。
+- target側のdiffを確認するまでsource側の変更を削除しない。
+- cleanupは移植成功の確認後に別stepとして行う。
 
-## Minimum-Diff and Scope Gate
+## Commit
 
-明示的なPR target/base branchがある場合はそれを起点にし、ない場合だけauthoritative remote metadataからdefault branchを解決する。通常は`main`、存在しなければ`master`等だが、branch名を推測しない。
-
-作業開始前に、以下を確認する。
-
-- 目的、受け入れ条件、変更対象、PR target/base branchを列挙する
-- 現在のbranch、worktree、確定したtarget branchとの差分を確認する
-- target branchがremoteに存在し、取得したOIDと一致することを確認する
-- 各変更が目的達成に必要かを確認する
-- 未マージbranch、作業途中worktree、関連機能の実装を暗黙の土台にしない
-- 関連機能を含める場合は、import、route、schema、runtime call、再現可能な失敗ログなどの具体的な依存を確認する
-
-実装後は、作業開始時に確定したPR target/base branchとの差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
-
-## Portable Change-Target Gate
-
-repositoryやagentをまたいで変更を展開する場合、Hermes/Codex等のagent固有機能や、ロード済みskillの記憶だけでtargetを決めない。リポジトリ非依存の`skills/change-target-gate/scripts/change-target-gate.mjs`を実行し、manifestで宣言したrepository・base・artifact・pathだけを変更対象にする。
+commit前に:
 
 ```bash
-# 既存artifactを先に探索する
-node skills/change-target-gate/scripts/change-target-gate.mjs discover --repo . --query "git workflow"
-
-# 作業前後に、repository ownership・patch/create・実際のdiffを検証する
-node skills/change-target-gate/scripts/change-target-gate.mjs verify \
-  --policy /path/to/change-target-policy.json \
-  --manifest /path/to/change-target-manifest.json \
-  --base <resolved-pr-target>
+git status --short
+git diff
+git diff --cached
+git branch --show-current
 ```
 
-`--base`には作業開始時に確定したPR target/base branch（例: `origin/main`、`origin/master`、`origin/release/1.x`）を渡す。`main`を固定値として渡したり、targetと異なるbranchを暗黙に使用したりしない。
+- staged diffを見ずにcommitしない。
+- detached HEADのままcommitしない。
+- commit messageが決まっているautomationではeditorを起動しない。
 
-- `patch`対象がbase refに存在しない場合、`create`対象が既に存在する場合は停止する
-- originのrepository、manifestのrepository、target repositoryが一致しない場合は停止する
-- manifestにないchanged path、base ref不在、target未宣言を成功扱いにしない
-- 複数repositoryへ展開する場合は、repositoryごとにsource of truthとmanifestを解決し、各repositoryで独立してgateを実行する。Hermesを特別扱いして禁止するのではなく、未計画targetだけを拒否する
-- `skills/change-target-gate/config/`には公開可能なschema例だけを置き、repository固有のpolicy・manifestはrepository外またはignore対象で管理する。このskillはrepositoryごとのadapterであり、共通の判定ロジックを複製して他agentへ埋め込まない。各repositoryは自分のcanonical repositoryとallowlistを定義する
-- gateが失敗した状態で編集、commit、push、issue/PR作成を続行しない
+commit signingのfallback可否はpolicyで決めます。このskillは署名failureを自動的にunsigned commitへ変換しません。
 
-## Commit / Rebase / Push Guidelines
+## Rebase / merge conflict
 
-- status を見ずに commit しない
-- staged diff を見ずに commit しない
-- commit 前に `git diff --cached` で commit 対象を最終確認する
-- commitが `error: gpg failed to sign the data` で失敗した場合、署名鍵(1Password等)がロック中で使用できない可能性がある。diffの内容やstage漏れが原因と誤認せず、`git commit --no-gpg-sign` で1回だけ再試行してよい(fail-open)。再試行で成功した場合は無署名commitになった旨を完了報告に明記する。同じ引数の再試行でも失敗する場合は署名以外の原因を疑い、原因を報告して停止する
-- branch 名を見ずに push しない
-- push / PR 前に公開したい commit SHA を確認する
-- buildやgeneratorがtracked/generated artifactを更新するrepositoryでは、最終build・生成を完了してから意図した生成物をstageし直す。verification metadata（サイズ、gzipサイズ、hashなど）がある場合は最終出力と照合し、`git status --short --untracked-files=all` とunstaged側の `git diff` で未stageの意図しない差分がないことを確認する。staged側のwhitespaceは `git diff --cached --check`、unstaged側のwhitespaceは `git diff --check` で別途検査し、stage後にbuildやgeneratorを再実行した場合は同じ確認をやり直す
-- 生成物をstageし直す操作は実装者側のgit workflowとして行い、reviewerへは最終revisionに含まれるartifactと照合結果をevidenceとして渡す。review中にindexを変更して以前のevidenceを無効化しない
-- PR を独自フォーマットで書き始めない。作成前に対象 repository の `.github/PULL_REQUEST_TEMPLATE.md` と直近の merge 済み PR を確認し、実運用の body 形式(見出し構成等)に合わせる
-- push 前に意図しない file が含まれていないか再確認する
-- **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。既存PRへ追加変更を反映する場合に、別branchや新規PRへ分割してはならない。branchを分ける / PRを分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 既存PRへの追加変更を新規PR作成の許可と誤解し、closeとcherry-pickの後始末が発生した)
-- **push 先 repository が公開かどうかを push 前に必ず確認する**。業務コンテキストや社内情報など公開できない内容を含む branch は、push 自体がデータの持ち出しになるため、push せずローカル commit(必要なら deploy)に留める。対象 branch に remote 追跡が無い場合は「まだ push していない」ではなく「push しない運用」の可能性を先に疑い、ユーザーへ確認する
-- conflict解消前にも、作業開始時に確定したPR target/base branchを再照会し、exact refをfetchしてOID一致を検証する。そのtarget branchへrebaseする。`main`/`master`へguessしたり、remote default branchへ勝手にrebaseしたりしない
+conflict時はzero-guessingを優先します。
 
+1. `git status --short` とconflicted pathsを取得する。
+2. conflict marker、rename/delete、generated artifact等で意味判断が必要なら自動解決を続けない。
+3. 機械的に解決できる場合でも `git diff --check`、conflict marker検索、statusを確認する。
+4. `rebase --skip` をfailure recoveryのdefaultにしない。
+5. `rebase --continue` / merge continuationで別errorが出た場合、分類せずskipせず状態を保存して停止する。
 
+## History rewrite and push
 
-## Algorithmic Git Safety Protocol (Mandatory)
-
-このセクションは説明的な推奨事項ではなく、commit / rebase / merge / push の前に実行結果で判定する必須プロトコルである。predicateを満たせない場合は操作を続行せず停止する。
-
-### Pre-flight predicates
-
-履歴を書き換える操作、または既存remote branchを更新する前に、対象branchを確定し、以下を記録する。
+既存remote branchのhistoryを書き換える前にremote OIDとrollback refを記録します。
 
 ```bash
 set -euo pipefail
@@ -210,101 +167,52 @@ git update-ref "$backup_ref" HEAD
 printf 'branch=%s\nremote_oid=%s\nbackup_ref=%s\n' "$branch" "$recorded_oid" "$backup_ref"
 ```
 
-- `recorded_oid`、対象branch、backup refを保存できない場合は停止する。
-- remote branchがunborn、またはremote OIDを取得できない場合は、既存branchの上書き手順を適用せず、状態を報告する。
-- 対象branchが`main`、`master`、またはrepositoryで保護対象として宣言されたbranchの場合、force pushを実行しない。
+- protected/default branchへforce pushしない。
+- history rewriteが明示的に許可された場合も `--force` ではなくexact OIDを使った `--force-with-lease` を使う。
+- lease rejectionをblind retryしない。
 
-### Non-interactive predicates
-
-- commit messageが確定している操作は`git commit -m '…'`または`git commit --no-edit`を使い、エディタを起動しない。
-- コマンドがハングする、または意図せずエディタが起動した場合は、入力を続けず、進行中の操作を`git rebase --abort`または`git merge --abort`で中止する。
-- `GIT_EDITOR=true`等で失敗を隠すのではなく、abort後に原因と現在のHEAD、backup refを報告する。
-
-### Conflict predicates (zero guessing)
-
-- conflict発生時はまず`git status --short`とconflicted pathを取得する。
-- `git rebase --skip`、`git merge --abort`後の無確認retry、または意図不明な自動解決は禁止する。
-- conflict markerが残っている、変更の意味を解釈する必要がある、削除・rename・生成物の採否を判断する必要がある、またはresolutionを機械的predicateで証明できない場合は、直ちに`git rebase --abort`（mergeなら`git merge --abort`）して停止する。
-- 機械的に検証可能な解決を行った場合でも、`git diff --check`、conflict marker検索、`git status --short`がすべて成功するまでcontinueしない。
-- `rebase --continue`が空commit、次のconflict、または別のエラーを返した場合は、結果を分類せず`--skip`しない。状態を保存してabortし、報告する。
-
-### Push and post-push predicates
-
-通常の更新では`git push origin "$branch"`を使う。履歴を書き換えた更新でforceが明示的に許可されている場合だけ`--force-with-lease`を使い、`--force`は使わない。
-
-push前に、作業対象が期待するcommitであることを検証する。
+push後はremote refを再取得してexpected HEADと一致することを確認します。
 
 ```bash
-set -euo pipefail
 expected_oid=$(git rev-parse HEAD)
-test "$expected_oid" = "$(git rev-parse HEAD)"
 git push origin "$branch" --force-with-lease="refs/heads/$branch:$recorded_oid"
 git fetch --no-tags origin "refs/heads/$branch"
-actual_oid=$(git rev-parse "FETCH_HEAD")
+actual_oid=$(git rev-parse FETCH_HEAD)
 test "$actual_oid" = "$expected_oid"
-printf 'push_verified branch=%s oid=%s previous_oid=%s\n' "$branch" "$actual_oid" "$recorded_oid"
 ```
 
-- lease rejectionはterminal failureとし、fetchしてから再試行したり、leaseなしforceへ変更したりしない。
-- `actual_oid != expected_oid`、fetch失敗、または対象refが期待と異なる場合はpush成功と報告しない。
-- OID比較で検証できない状態は未完了として扱い、push成功を推測しない。
+通常のfast-forward pushではforce optionを付けません。
 
-## Cleanup Guidelines
+## Cleanup
 
-- cleanup は root checkout と worktree のどちらに対して行うか明確にしてから実行する
-- `.worktree/` 自体を誤って消さない
-- `git clean`はquarantine・identity再検証・rollbackがないためcleanup手段として使わない
-- root checkout の status に `.worktree/` が出る場合は、repository の local exclude で隠すことを優先する
-  - `.gitignore` を変更せずに隠すには root checkout で `echo '.worktree/' >> .git/info/exclude`
-- 手動cleanupでもtrackedだけでなくuntracked・ignored fileを個別に検査し、1つでもあれば削除しない
-- 手動・自動を問わず破壊的cleanupでは`fail-closed-automation` skillを併用し、そのGit worktree cleanup predicatesをauthoritativeな安全要件として適用する
-- 最低限、tracked・untracked・ignoredが空であること、authoritative remote default名/OIDとexact merge evidenceが削除直前にも一致すること、quarantineをraw renameではなく`git worktree move`で行えることを要求する
-- worktree登録の削除を確認したら、続けてlocal branchも`git branch -d`(safe deleteのみ)で削除してよいが、これはworktree削除からbranch削除まで同一のexclusive cleanup authority/fencing lease(`fail-closed-automation`要件)を保持したまま連続して行う場合に限る。`git branch -d`は対象branchが他worktreeでcheckout中の場合に拒否する(実測確認済み: `error: cannot delete branch ... used by worktree at ...`)が、このcheckとref削除の間には別プロセスが新規worktreeを登録し得るTOCTOU窓があるため、この拒否挙動単体を安全の根拠にしてauthority/leaseの保持を省略しない。`-D`による強制削除は行わない。remote branchは明示依頼なしに削除しない
-- 手動cleanupでも以下のread-only検査だけを根拠に削除してはいけない。検査後に上記のauthoritative remote/OID、merge evidence、`git worktree move` quarantine、削除直前再検証をすべて実施する
+destructive cleanupでは、read-only snapshotだけを根拠に即削除しません。
 
-```bash
-git -C .worktree/feature-short-name status --short
-git -C .worktree/feature-short-name ls-files --others --exclude-standard
-git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standard
-```
+最低限確認するもの:
 
-`git worktree remove`や`git branch -d`をこのsnapshotだけに続けるshortcutは禁止する。無人・手動を問わず、削除直前に全predicateと別worktreeで未使用であることを再検証してから実行する。
+- tracked changes
+- untracked files
+- ignored files
+- worktree registration
+- current branch / HEAD
+- remote target/ref
+- merge evidence
+- 別worktreeが同branchを使用していないこと
 
-### Post-Merge Cleanup Routine
+`git clean` や `git branch -D` をdefault cleanupにしません。
 
-ユーザーから「マージしたのでcleanupして」等、PRがmergeされた直後のcleanupを明示的に依頼された場合の定型手順。安全要件そのもの(quarantine経由の削除を含む、上記Cleanup Guidelines)は省略せず適用し、以下はその手順に加えて確認すべき点を補う。
+worktreeを削除する場合は、可能なら一度 `git worktree move` でquarantineし、移動後にもstatusとidentityを再確認してからremoveします。local branch削除はsafe delete (`git branch -d`) を使い、失敗したらforceへ自動昇格しません。
 
-1. `gh pr view <number-or-branch> --json state,mergedAt` でmerge済みであることを確認する(mergeされていない、または確認できない場合は中止する)
-2. 上記Cleanup Guidelinesの安全要件(tracked/untracked/ignoredが空、authoritative remote default名/OIDとexact merge evidenceの一致)を先に確認する。満たさない場合はここで中止し、以降のteardown・quarantine・削除には進まない
-3. 安全要件を満たすことを確認できたら、対象worktreeでdocker compose等のプロセス・コンテナを起動していた場合に限り `docker compose down`(または同等のteardownコマンド)を実行する。この時点ではまだ`git worktree move`でquarantineしていないためCompose定義はまだ存在する。**この順序が重要**: 安全性検証より前にteardownすると、誤って別worktreeやdirtyなworktreeのコンテナ・プロセスを停止してしまう。逆にquarantine・削除の後でteardownしようとすると、対象のCompose定義ごと消えており実行不能になる
-4. 上記Cleanup Guidelinesの手順どおり `git worktree move` でquarantineし、quarantine後に安全要件を再検証してから `git worktree remove` する。read-only検査だけを根拠に直接削除しない
-5. local branchを削除する(`git branch -d`。safe deleteのみ、`-D`は使わない)。squash/rebase mergeの場合、branchの先端commitがdefault branchの祖先にならず`git branch -d`が「not fully merged」で失敗することがある。この場合`-D`で強制削除せず、branchを保持したまま明示的なfollow-up対象として報告する(手順1で確認したPRのmerge自体は正当なので、削除の失敗はcleanup対象の見落としではない)
-6. remote branchは明示依頼がない限り削除しない(GitHubのauto-delete設定に委ねるか、別途確認する)
+remote branch削除は明示されたworkflowでのみ行います。
 
-## Common Pitfalls
+## Completion evidence
 
-- dirty な root checkout を安全な作業場所だと誤認する
-- `.worktree/` が存在するだけで、既に専用 worktree 内にいると思い込む
-- linked worktree 内でさらに `.worktree/` を作り、worktree を入れ子にする
-- agent やツールが作成した linked worktree の detached HEAD を見落としたまま commit する
-- root checkout にいるのに `.worktree/` を optional な慣習扱いして feature 作業を続ける
-- tracked file だけ戻して untracked file を置き去りにする
-- `git diff --cached` を見ずに commit する
-- branch 名や commit SHA を確認せず push / PR を作成する
-- cleanup 系コマンドを対象確認なしで実行する
-- feature 作業後も main checkout に変更を残す
-- ドキュメント作成のみだから worktree は不要と判断し、root checkout で作業する(実測: 別々の session が並行して root checkout に設計ドキュメントをそれぞれ untracked で作成し、各 session の stop 時 review が root の diff 全体を対象にしたため、他 session の未 commit 変更まで自分のレビュー対象に混入した)
+操作の種類に応じて、完了前に次を再確認します。
 
-## Mandatory Skill Enforcement
+- repository/worktree identity
+- current branch
+- working tree / staged diff
+- commit SHA
+- push後のremote OID
+- cleanup後のworktree registration
 
-- この skill が load されたら、git 操作を始める前に repository root / Git dir / common Git dir / branch / worktree / working tree 状態を必ず確認すること
-- `git_dir != common_dir` なら現在の linked worktree を再利用し、新しい worktree を作成しないこと
-- `.worktree/` 以下で起動した場合、既存の linked worktree を再利用し、共有 `.git` へ書き込む `git worktree add` を試行しないこと
-- `git_dir == common_dir` でコード変更を行うなら、root checkout ではなく `.worktree/` 配下の専用 worktree を作成して移動すること
-- detached HEAD のまま commit / rebase / push しないこと
-- コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
-
-- commit / push を行う場合、完了報告前に `git diff --cached` と対象 branch / commit SHA を必ず確認すること
-- build/generatorが生成物をtrackするrepositoryでは、最終build後に生成物をstageし直し、verification metadataとの照合結果とunstaged差分の不在を完了報告前に確認すること
-- main checkout に feature 変更が残っている場合、その時点で未完了として扱い、cleanup を優先すること
-- root checkout で変更を続けていた、または `.worktree/` guideline に違反していた場合、その時点で未完了として扱い、worktree への移植と root の復元を優先すること
+commandが成功したというexit codeだけで、別ref・別worktreeへ意図した変更が反映されたと推測しません。

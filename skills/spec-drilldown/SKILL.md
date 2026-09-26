@@ -1,208 +1,92 @@
 ---
 name: spec-drilldown
-description: 'TRIGGER when: アプリケーション・新機能・CLI・API・画面などの新規作成依頼を受けたとき、実装や plan 作成に着手する前に発火する。ユーザーへの質問で詳細仕様書を作り、上位モデル（利用不能時は独立した同等モデル）の敵対的レビューに合格してから実装へ進む。明確な bugfix や仕様が既に十分詳細な依頼では使わない。'
+description: '新規機能やarchitectureの実装前に、materialな曖昧さを解消し、実装可能なcanonical specificationを作るときに使う。明確なbugfixや既に十分な仕様があるtaskでは使わない。'
 ---
+
+## Package overlays
+
+このskillをloadしたら、同じskill directory内の追加layerを次の規則で適用する。
+
+- `policies/default.md` が存在する場合は読む。
+- current runtimeを特定でき、`adapters/<runtime>.md` が存在する場合だけ読む。
+- exact active model identityを特定でき、対応する `profiles/<provider>/<exact-model>.md` が存在する場合だけ読む。
+- runtime/modelを推測して近似adapter/profileを適用しない。
+
 
 # Spec Drilldown
 
 ## Goal
 
-作成依頼を受けた時点の要求は通常曖昧である。いきなり実装を始めず、質問によって仕様の曖昧さを削り、**どのモデル・どのセッションが実行しても追加質問なしで同じ成果物に到達できる詳細度の仕様書** を作ってから実装フェーズへ進む。
+実装結果を分岐させる曖昧さを解消し、**別のagent/modelへ渡しても同じacceptance criteriaを実装できるcanonical specification** を作ります。
 
-## Skip Conditions
-
-以下の場合はこの skill の質問ループを省略してよい:
-
-- 依頼に Exit Criteria をすべて満たす仕様が既に含まれている
-- 明確な bugfix・小さな refactoring など、仕様の自由度がほぼない作業
-- ユーザーが「質問せずにまず作って」「使い捨てのプロトタイプでよい」と明示した場合
-  - この場合も、置いた仮定を成果物と一緒に必ず列挙する
-
-### 基盤置換は原則skipしない
-
-依頼が障害復旧・依存削除・既存実装の置換として提示されていても、次のいずれかを置換・導入する場合は「明確なbugfix」としてskipしてはならない。
-
-- queue / stream / broker / event bus / job runner
-- cache lock / distributed lock / leader election
-- retry / backoff / DLQ / ack / consumer group
-- 実行境界をまたぐ連携（Node、Worker、serverless function、外部SaaS等）
-
-これらは、少なくとも配送保証、timeout時の成否不明状態、冪等性、再試行、部分失敗、永続outbox、認証境界、運用時の回復手順のいずれかを変更し得る。技術方式が未検証、またはこれらの挙動がExit Criteriaとして明文化されていないなら、仕様書と敵対的レビューが必須である。
-
-実装途中に、選んだAPIが存在しない・実行環境でbindingを直接利用できない・delivery semanticsが既存要件を満たさないことが判明した場合も、局所的な回避実装へ進んではならない。実装を停止し、技術検証・仕様書・敵対的レビューの工程へ戻る。
+このskillは仕様化のsemantic contractを定義します。いつ仕様を必須にするか、質問をどの程度積極的に行うか、どのreviewer tierを必須にするかはworking agreement/model profileの責務です。
 
 ## Workflow
 
-1. **要求の把握**: 依頼文・既存コード・関連ドキュメントを読み、既に決まっていることを確認する。自分で調べて分かることをユーザーに質問しない
-2. **曖昧点の洗い出し**: Question Categories に沿って未決事項を列挙し、実装の分岐に影響する順に優先度を付ける
-3. **質問ループ**: 優先度の高い未決事項から質問する。構造化された質問ツールがあれば使う（Claude Code では AskUserQuestion、1回につき最大4問）。回答を受けて仕様を更新し、Exit Criteria を満たすまで繰り返す
-4. **技術検証**: 仕様書に記載する技術方式（サービス選定・API・連携手段）の実現可能性を Technical Investigation に従って検証する
-5. **仕様書の作成**: Exit Criteria のうちレビュー以外の項目を満たしたら Spec Document の初稿を作成する
-6. **敵対的レビュー**: Adversarial Review に従って上位モデル（利用不能時は独立した同等モデル）に初稿をレビューさせ、Blocking / Major の指摘を解消する
-7. **承認と実装への接続**: レビュー合格後の仕様書をユーザーへ提示し、承認を得てから plan / 実装へ進む。plan mode を使う場合は仕様書を plan の入力にする
-
-## Technical Investigation
-
-仕様書は「どのモデルが実行しても同じ成果物に到達する」ための文書である。**未検証の技術前提を仕様書に書くと、実装フェーズでそれが実現不可能と判明したとき、実装モデルが仕様にない回避策を独自に発明し、仕様と成果物が乖離する**。これを防ぐため、drilldown 時点で以下を行う:
-
-- **仕様書に記載する技術方式は記載前に実現可能性を検証する**。サービスの選定・API の存在・連携手段は、公式ドキュメント・ローカルの SDK/型定義・検証コマンドのいずれかで「その方式が実際に構成可能である」ことを確認してから書く
-- **training 知識を前提にしない**。特にクラウドサービス・外部 SaaS の API は知識カットオフ以降に変わっている前提で、最新の公式ドキュメント（WebSearch/WebFetch）やインストール済み SDK の型定義で現在の仕様を確認する。**制約を見つけた場合は、その制約を持たない後継サービス・新機能がないかまで調査してから仕様に採用する** （制約だけ見て回避構成を仕様化すると不要な複雑さが仕様に固定される）
-- **検証結果と出典を仕様書（Tech Stack / Assumptions）に記載する**。出典（ドキュメント URL・確認した型定義のパス・検証コマンドと結果）のない制約・技術方式を仕様書に書かない
-- 方式選定を実装フェーズへ保留する場合（「実装時に判断する」）は、**選択肢・判断基準・調査方法を仕様書に明記**し、実装モデルの自由裁量にしない
-
-## Adversarial Review
-
-仕様書の作成者は、作成時に置いた思い込みを自己レビューでも見逃しやすい。ユーザー承認の前に、仕様書を独立したレビュアーへ渡し、追加質問なしでは実装できない曖昧さ・矛盾・欠落を敵対的に探させる。
-
-この節を、**仕様書の**レビュー入力・判定schema・合格条件を定義するクロスエージェントの正本とする。実装コードのstatic scan、test/lint/build、コード差分review、実装後closureは共有の`code-review` skillを正本とし、このskillでは重複定義しない。Hermes、Claude Code、Codex、GitHub Copilotなど各ランタイム固有のCLI・wrapper・model指定は、各正本skillを置き換えるものではなく、契約を実行するadapterとして扱う。
-
-ランタイム固有adapterを使う場合も、次を満たさなければ有効なレビュー証跡にしない:
-
-- Review Inputsだけを独立コンテキストへ渡す
-- 実際に使用されたモデル名・能力tierを記録する
-- Blocking / Major / Minor / Invalid のschemaを保持する
-- processのexit code 0だけを合格根拠にせず、構造化されたVerdictを検証する
-- transcriptまたは同等のレビュー記録を保存し、対象revisionと結び付ける
-
-adapterが出力0 bytes、Verdict欠落、rate limit、timeout、model不一致を返した場合はfail-closedとし、`Pending: qualified reviewer unavailable`または再実行対象にする。固有toolが利用できる環境でも、そのtool側にレビュー契約を複製せず、このskillの契約へ従わせる。
-
-レビュー実行と再レビューでは、次のクロスエージェント運用を守る:
-
-- identity-sensitiveなgateは毎回freshな独立process/sessionで実行する。resumeしたsessionは現在のdefault modelへ切り替わる可能性があるため、実モデルidentityを再証明できない限り合格証跡に使わない
-- repository側のcanonical test / lint / buildはorchestratorが実行し、観測したcommandと結果をReview Inputsへ含める。reviewerには原則read-onlyな静的レビューを依頼し、同じ重い検証を無制限に再実行させない
-- Blocking / Majorを修正した後は、元の指摘ID、対象file/section、対象revisionを明記したfreshなclosure reviewを行い、各指摘の解消と新規Blocking / Majorの有無を確認する
-- 初回とclosure reviewのprompt、transcript、Verdictを上書きせず別artifactとして保存する。途中reasoningやpartial outputだけから合格を推定しない
-
-これらは特定CLIの呼び出し方ではなくレビュー証跡の契約である。各runtime adapterは、この契約を満たすfresh session、read-only実行、artifact保存、identity/Verdict検証へ変換する。
-
-### Reviewer Selection
-
-レビュアーは、**仕様作成モデルより仕様理解・設計推論・欠落検出の能力が高いモデル**を優先する。上位モデルを利用できない場合は、仕様作成モデルと同等の能力を持つモデルを独立したコンテキストで使ってよい。同等モデルへのフォールバックでは、仕様作成時の会話・推論・中間メモを引き継がず、Review Inputs だけを与える。
-
-モデル選定時は、利用環境で明示された capability tier、モデル系列、reasoning 設定、または運用上合意された序列を根拠にする。単に新しい・高価・別providerという理由だけで上位または同等と推定しない。仕様作成モデルとレビューモデルの名前、reasoning tier（取得可能な場合）、能力関係を判断した根拠をレビュー記録に残す。
-
-選定順序は次の通り:
-
-1. 仕様作成モデルより上位のモデル
-2. 上位モデルを利用できない場合は、独立コンテキストの同等モデル。レビュー記録に `Fallback: equivalent reviewer` と理由を残す
-3. 同等以上のモデルを利用できない場合は、Spec Document のレビュー状態を `Pending: qualified reviewer unavailable` とする
-4. Pending の場合は利用できない理由と必要なモデル条件をユーザーへ報告し、レビュー環境を用意するか、レビューを延期するか判断してもらう
-
-同等以上のモデルによるレビューが完了するまで Exit Criteria 未達とし、仕様完成・承認待ち・実装可能の状態へ進めない。レビュー手段がないことを理由に黙って省略したり、下位モデルのレビューを有効な合格判定として扱ったりしない。
-
-委譲・CLI等でレビューを実行した場合は、**完了時に実際に使われたモデル名と能力tierを確認する**。依頼時の指定・期待と実績が異なり下位モデルだった場合、その出力は改善のための非公式フィードバックとしては利用できるが、敵対的レビューの合格・Blocking/Major 0件の根拠には使わない。Spec Documentには `Pending: qualified reviewer unavailable` と実績を記録し、同等以上の独立レビュアーを別途確保する。
-
-### Review Inputs
-
-レビュアーには次の情報だけを渡す:
-
-- ユーザーの原要求
-- 作成された Spec Document
-- Exit Criteria
-- 必要な場合のみ、対象リポジトリの調査結果や技術検証の出典
-
-**会話履歴全体は渡さない**。仕様書にない情報を会話から補完できる状態では、「仕様書単独で実装可能か」を検査できない。レビュー対象のリビジョンまたは更新日時を記録し、どの版への指摘か追跡可能にする。
-
-### Reviewer Role and Output
-
-レビュアーには「承認や要約ではなく、実装を失敗させる欠落を発見する役割」であること、仕様書にない事項を常識や暗黙の仮定で補わないことを明示する。各指摘には以下を要求する:
-
-- ID
-- Severity
-- 該当箇所
-- 失敗シナリオまたは実装が分岐する理由
-- 必要な決定または具体的な修正案
-
-Severity は次の4段階に限定する:
-
-| Severity | 判定基準 |
-| --- | --- |
-| Blocking | 追加質問なしでは実装が一意に定まらない、または要求を満たせない |
-| Major | 受け入れ条件・エラー処理・技術的実現性・データ整合性など重要事項に欠落や矛盾がある |
-| Minor | 実装結果を左右しない表現改善や補足 |
-| Invalid | 原要求・既存コード・検証済み事実と矛盾する指摘 |
-
-少なくとも、原要求の取りこぼし、入出力、データライフサイクル、失敗時挙動、認証/認可、冪等性、並行実行、再試行、部分失敗、性能条件、外部APIの未検証前提、Out of Scope と Acceptance Criteria の矛盾、検証不能な受け入れ条件、用語の揺れを確認させる。
-
-### Resolution and Review Gate
-
-1. 全指摘を Blocking / Major / Minor / Invalid に分類する
-2. Blocking / Major は仕様書を修正して解消する。調査で決まる事項は自律調査し、ユーザー判断が必要な事項だけ再質問する
-3. 指摘を採用しない場合は、Severity を Invalid とした根拠を記録する
-4. 修正版を再レビューする
-5. **Blocking 0件・Major 0件**で合格とする。Minor は合格を阻害しない
-
-再レビューは原則2回までとする。それでも Blocking / Major が残る場合は、未解決事項または明示的な Assumption としてユーザーへ判断を求め、レビューを無限に反復しない。再レビューにも初回と同じ最低能力条件を適用し、修正後だけ下位モデルへ切り替えない。
-
-レビュー結果は Spec Document の `Adversarial Review` に要約する。詳細が長い場合は `docs/spec/reviews/<slug>-review.md` に分離し、仕様書からリンクする。最低限、仕様作成モデル、レビューモデル、能力関係の根拠、同等モデルへフォールバックした場合はその事実と理由、対象リビジョン、合否、解消した指摘、Invalid とした指摘と理由を残す。
+1. **Known facts**: 依頼、既存コード、schema、関連docsから既に決まっていることを抽出する。
+2. **Investigate**: repository、currentな公式資料、SDK/type、利用可能な実データを調べ、自分で解消できる未決事項を閉じる。
+3. **Decision boundary**: reversibleな局所判断はassumptionとして明記できる。product/design/security/data semanticsなど、結果が長く残る複数案はユーザー決定として残す。
+4. **Canonical spec**: Inputs/Outputs、Data Model、Interface、Error Handling、Non-functional Requirements、Out of Scope、Acceptance Criteria、Assumptionsを文書化する。
+5. **Technical verification**: 外部service/API/runtime capabilityに依存する方式は、仕様へ固定する前に実現可能性を検証する。詳細は [references/technical-investigation.md](references/technical-investigation.md)。
+6. **Adversarial review**: reviewが要求される場合、spec単体で実装できるかを独立contextで検査する。contractは [references/adversarial-review.md](references/adversarial-review.md)。
+7. **Handoff**: material decisionとrequired reviewが閉じたcanonical specを実装入力にする。
 
 ## Question Categories
 
-質問は下記カテゴリを網羅的に検討し、**実装の分岐に影響するものだけ** を聞く:
+ユーザー判断が必要なときは、実装を分岐させる項目だけを質問します。
 
 | カテゴリ | 決めること |
 | --- | --- |
 | 目的・ユーザー | 誰が何のために使うか、解決したい課題 |
-| 入出力 | 入力の形式と具体例、出力の形式と具体例 |
-| データ | データモデル、永続化の要否、スキーマ、既存データとの関係 |
-| 技術スタック | 言語、framework、実行環境、依存してよい外部サービス |
-| インターフェース | 画面構成・操作フロー、CLI ならサブコマンド/フラグ体系、API ならエンドポイント設計 |
-| エラー・エッジケース | 異常入力・失敗時の挙動、バリデーション、リトライ |
-| 非機能 | 性能、データ量の規模、認証/認可、並行実行 |
-| スコープ | 今回やらないこと、将来対応でよいこと |
+| 入出力 | 入力形式、出力形式、具体例 |
+| データ | data model、永続化、schema、既存dataとの関係 |
+| 技術スタック | language、framework、runtime、外部service |
+| Interface | UI flow、CLI command/flag、API contract |
+| Failure | validation、retry、partial failure、recovery |
+| Non-functional | performance、scale、authn/authz、concurrency |
+| Scope | 今回やらないこと、将来対応 |
 
-## Question Guidelines
-
-- open-ended な「どうしますか?」ではなく、推奨案を含む選択肢を提示する。推奨は先頭に置き "(Recommended)" を付ける
-- 「この回答で実装のどの分岐が決まるか」を説明できない質問はしない
-- 既存コードの慣習やライブラリの有無など、調査すれば決まることを質問しない
-- 1回の質問セットは最大4問に絞り、回答が次の質問に影響するものは次のループに回す
-- 質問ループは通常2〜3往復で収束させる。収束しない場合は、残りを仮定として仕様書に明示する方式へ切り替えてよいかをユーザーに確認する
+固定の質問数や往復回数をこのskillでは定義しません。調査で決まることをユーザーへ転送しないことを優先します。
 
 ## Exit Criteria
 
-仕様が完成したと言えるのは以下をすべて満たすとき。1つでも欠けるなら質問するか、ユーザーの許可を得た明示的な仮定で埋める:
+canonical specは少なくとも次を満たします。
 
 - [ ] 入力と出力が具体例付きで定義されている
-- [ ] 永続化するデータがあるなら、データモデル/スキーマが確定している
-- [ ] 技術スタックと実行環境が確定している
-- [ ] 仕様書に記載した技術方式（サービス・API・連携手段）の実現可能性が出典付きで検証されている（Technical Investigation 参照）
-- [ ] 主要なエラー・エッジケースの挙動が定義されている
-- [ ] スコープ外の項目が明記されている
-- [ ] 検証可能な受け入れ条件（Acceptance Criteria）が列挙されている
-- [ ] この仕様書だけを渡された別のモデルが、追加質問なしで同等の機能を実装できると言える
-- [ ] 上位モデル（利用不能時は独立コンテキストの同等モデル）による敵対的レビューが実施され、モデル名・能力関係の根拠・フォールバック理由・結果が記録されている
-- [ ] 敵対的レビューの Blocking / Major が0件で、採用・却下した指摘の処理結果が追跡できる
+- [ ] 永続dataがある場合、data model/schemaが確定している
+- [ ] 技術stackとruntimeが確定している
+- [ ] 外部service/API/runtime capabilityのmaterialな前提が検証されている
+- [ ] 主要なerror/edge caseの挙動が定義されている
+- [ ] Out of Scopeが明記されている
+- [ ] 検証可能なAcceptance Criteriaが列挙されている
+- [ ] assumptionとユーザー決定が区別されている
+- [ ] spec単体を別agent/modelへ渡しても、会話履歴から情報を補わず実装できる
+- [ ] working agreementが要求するreview gateがある場合、その結果が追跡できる
 
 ## Spec Document
 
-- 保存先: 対象リポジトリに仕様書の慣習があればそれに従い、なければ `docs/spec/<slug>.md`
-- 構成:
-  - Overview（目的・ユーザー）
-  - Inputs & Outputs（具体例付き）
-  - Data Model
-  - Tech Stack
-  - Interface（UI/CLI/API）
-  - Error Handling
-  - Non-functional Requirements
-  - Out of Scope
-  - Acceptance Criteria
-  - Assumptions（ユーザーの許可を得て仮定で埋めた項目）
-  - Adversarial Review（仕様作成/レビューモデル・能力関係の根拠・フォールバック理由・対象版・合否・指摘の処理結果）
-- 実装完了までの間に仕様変更が発生したら、会話内だけで処理せず仕様書本体を更新する
+repositoryに慣習があれば従い、なければ `docs/spec/<slug>.md` を使います。
 
-## Prohibitions
+推奨構成:
 
-- 仕様書の承認前に実装コードを書き始めることを禁じる
-- 未決事項を暗黙に仮定して埋めることを禁じる。仮定する場合は Assumptions として仕様書に明示し承認を得る
-- 1回の質問セットで5問以上を投げること、同じ内容を言い換えて再質問することを禁じる
-- Exit Criteria を満たさないまま「仕様は十分」と判断することを禁じる
-- 敵対的レビューに会話履歴全体を渡し、仕様書の欠落を会話から補完させることを禁じる
-- 仕様作成モデルより下位のモデルによるレビューを、有効な敵対的レビューまたは `Passed` と扱うことを禁じる
-- Blocking / Major を未処理のままユーザー承認または実装へ進むことを禁じる
+- Overview
+- Inputs & Outputs
+- Data Model
+- Tech Stack
+- Interface
+- Error Handling
+- Non-functional Requirements
+- Out of Scope
+- Acceptance Criteria
+- Assumptions
+- Technical Investigation
+- Adversarial Review（要求される場合）
 
-## Completion
+実装中にmaterialな仕様変更が発生したら、会話内だけで処理せずcanonical specを更新します。
 
-- 完了条件は「質問した」ことではなく、**敵対的レビューに合格し、承認された Spec Document が存在する** こと
-- 実装フェーズへ進むときは仕様書のパスを報告する
-- 実装完了時は Acceptance Criteria との対応（満たしたもの / 満たしていないもの）を報告する
+## Boundaries
+
+- 未検証の外部API/service capabilityを既成事実として仕様へ固定しない。
+- reviewerに会話履歴を渡してspecの欠落を補完させない。
+- 調査で決まる事項を、agentが判断を避ける目的でユーザーへ質問しない。
+- policy/model固有の質問回数、approval cadence、reviewer model名をこのskillへ追加しない。
