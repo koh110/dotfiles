@@ -72,7 +72,7 @@ const { values } = parseArgs({
 async function main() {
   if (values.check) {
     if (!values.claude) {
-      console.error('--check は --claude 専用です: npx tsx deploy.ts --claude --check')
+      console.error('--check は --claude 専用です: node deploy.ts --claude --check')
       process.exitCode = 1
       return
     }
