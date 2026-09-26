@@ -181,6 +181,8 @@ node skills/change-target-gate/scripts/change-target-gate.mjs verify \
 - commitが `error: gpg failed to sign the data` で失敗した場合、署名鍵(1Password等)がロック中で使用できない可能性がある。diffの内容やstage漏れが原因と誤認せず、`git commit --no-gpg-sign` で1回だけ再試行してよい(fail-open)。再試行で成功した場合は無署名commitになった旨を完了報告に明記する。同じ引数の再試行でも失敗する場合は署名以外の原因を疑い、原因を報告して停止する
 - branch 名を見ずに push しない
 - push / PR 前に公開したい commit SHA を確認する
+- buildやgeneratorがtracked/generated artifactを更新するrepositoryでは、最終build・生成を完了してから意図した生成物をstageし直す。verification metadata（サイズ、gzipサイズ、hashなど）がある場合は最終出力と照合し、`git status --short --untracked-files=all` とunstaged側の `git diff` で未stageの意図しない差分がないことを確認する。staged側のwhitespaceは `git diff --cached --check`、unstaged側のwhitespaceは `git diff --check` で別途検査し、stage後にbuildやgeneratorを再実行した場合は同じ確認をやり直す
+- 生成物をstageし直す操作は実装者側のgit workflowとして行い、reviewerへは最終revisionに含まれるartifactと照合結果をevidenceとして渡す。review中にindexを変更して以前のevidenceを無効化しない
 - PR を独自フォーマットで書き始めない。作成前に対象 repository の `.github/PULL_REQUEST_TEMPLATE.md` と直近の merge 済み PR を確認し、実運用の body 形式(見出し構成等)に合わせる
 - push 前に意図しない file が含まれていないか再確認する
 - **「この PR の続きを進めて」と指示された場合、その PR と branch をタスク全体の制約として固定する**。既存PRへ追加変更を反映する場合に、別branchや新規PRへ分割してはならない。branchを分ける / PRを分割する場合は、その逸脱自体を明示して個別に確認を取る(実測: 既存PRへの追加変更を新規PR作成の許可と誤解し、closeとcherry-pickの後始末が発生した)
@@ -303,5 +305,6 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
 
 - commit / push を行う場合、完了報告前に `git diff --cached` と対象 branch / commit SHA を必ず確認すること
+- build/generatorが生成物をtrackするrepositoryでは、最終build後に生成物をstageし直し、verification metadataとの照合結果とunstaged差分の不在を完了報告前に確認すること
 - main checkout に feature 変更が残っている場合、その時点で未完了として扱い、cleanup を優先すること
 - root checkout で変更を続けていた、または `.worktree/` guideline に違反していた場合、その時点で未完了として扱い、worktree への移植と root の復元を優先すること
