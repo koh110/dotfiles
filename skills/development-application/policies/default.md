@@ -27,5 +27,6 @@
 
 - 「実装を書いた」ではなく、依頼のDefinition of Doneとacceptance criteriaを満たした時点を完了とする。
 - 変更に影響するlint/typecheck/build/testを実行し、今回の変更が原因のfailureは修正して再検証する。
+- 変更種別に応じたdomain-specific verificationを実行し、適用対象外の場合はN/A理由を独立reviewのinputsへ記録する。
 - taskに無関係な重い検証を儀式的に全実行すること自体を目的にしない。repositoryが必須gateを定義している場合はそれを優先する。
 - 完了報告では、確認したことと確認していないことを区別する。
