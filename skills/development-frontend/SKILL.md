@@ -18,6 +18,9 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx/.css/.scss files, crea
 ## Responsive Layout Verification
 
 - レスポンシブUIの変更では、media queryやselectorの宣言が存在するだけで完了扱いにしない。source order、specificity、`!important`、DOM順序を含むcascade後の実効値を確認する
+- `!important`は原則使わない。必要に見える場合はselectorの責務・コンポーネント境界・cascadeを見直し、例外は理由と影響範囲を独立reviewのinputsへ渡す
+- 対象ブラウザ範囲で安定して利用できる最新の標準CSS機能を優先する。コンポーネント自身のサイズに応じたレスポンシブ挙動には、viewport全体に依存するmedia queryよりcontainer query（`container-type` / `@container`）を基本とする
+- `container-type`はcontainmentによってintrinsic sizingや`@container`の適用範囲に影響するため、導入時はcontainer自身のサイズ計算と子要素の実効styleを確認し、例外や採用しない判断も理由と影響範囲を独立reviewのinputsへ渡す
 - 対象となる狭い幅・短い高さ・長い文言などのviewport条件を明示し、computed styleまたはDOMの実測geometryで、主要な操作対象・本文・ダイアログが重ならず到達可能であることを確認する
 - breakpointやlayout geometryに影響しないCSS変更（色、typography tokenなど）は、responsive geometry検証をN/Aとし、その理由を独立reviewのinputsへ渡す
 - CSS/build pipelineがcompiled assetを生成する場合は、最終build後のassetが検証したsourceと一致することを確認する。生成物をcommitするrepositoryでは、stageと未stage差分の扱いは`git-workflow`の「Commit / Rebase / Push Guidelines」にある生成物手順に従う
@@ -77,4 +80,4 @@ description: 'TRIGGER when: creating or editing .tsx/.jsx/.css/.scss files, crea
 - `.tsx` / `.jsx` を変更した場合、完了報告前に **変更した各ファイル** を再読し、上記禁止事項に違反していないか必ず確認すること
 - 1つでも違反が見つかった場合、その時点で「未完了」とみなし、説明より先に実装修正を優先すること
 - 特に `useEffect(` を追加・変更した場合は、「変更検知か」「API callか」を明示的に自己監査し、どちらかに該当するなら削除または別設計へ置き換えること
-- `.css` / `.scss` を変更した場合、またはbreakpoint依存のclass・style・layout構造を含む `.tsx` / `.jsx` を変更した場合は、完了前にResponsive Layout Verificationのcascade実効値、対象viewportのgeometry、compiled assetの確認（またはN/A理由）を再読チェックへ含めること
+- `.css` / `.scss` を変更した場合、またはbreakpoint依存のclass・style・layout構造を含む `.tsx` / `.jsx` を変更した場合は、完了前にResponsive Layout Verificationのcascade実効値（`!important`を含む）、container queryの採否とcontainment影響、対象viewportのgeometry、compiled assetの確認（またはN/A理由）を再読チェックへ含めること
