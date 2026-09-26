@@ -1,6 +1,6 @@
 ---
 name: development-application
-description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、再利用可能な学びはskillへ反映する。'
+description: 'アプリケーションの作成/開発時に参照する全般に適用される方針。互換性より最適な実装を優先する。実装完了時にlint/format/build/testの実行と結果報告を行い、telemetry/privacy契約の整合と再利用可能な学びをskillへ反映する。'
 ---
 
 ## Independent Review Gate
@@ -51,6 +51,13 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - 外部システムの実データ（本番スプレッドシート・外部API・DBの実レコード等）の状態が前提になる原因調査では、コード差分や git 履歴からの推論だけで仮説を確定して修正しない。**修正前に実データを直接確認する**（例: spreadsheet なら `google-spreadsheet` skill で該当セルを実際に読む）。独立レビュー（finish-review 等）は diff とコードベースの内部整合性しか検証できず、外部データ前提の正しさは保証しないため、レビュー通過を仮説の裏付けとして扱わない
 - **モノレポで package 間の設定・utility を共通化する設計をデフォルトにしない**。context が異なる package は一見同型でも分離を優先する（`tsconfig.base` のような共通化は、後から差分が出たときに全 package を巻き込む）。logger や fetcher のような「共通に見える」実装も同じで、共通化するのは変更理由が同一であることを説明できる場合だけにする
 - プロジェクト内の agent 向け knowledge（規約・手順のドキュメント）は、特定の agent ツールに依存しないツール中立な単一実体として置く。ツールごとにディレクトリを複製しない（実体は1つ、各ツールからは薄いポインタで参照する）
+
+## Telemetry and Privacy Contract
+
+- user-facingのtelemetry/privacy説明を変更する場合は、表示文言を実装されたevent schemaへイベント単位で照合する。各eventの許可parameter、値の意味、送信条件を一覧化し、UIの説明が別eventのparameterまで送信するように読めないことを確認する
+- 自動収集型analytics SDK（GA4など）による自動収集と、診断・操作に紐づく明示的なevent送信を区別して説明する。未送信の情報を送信すると読める表現や、送信される情報を過小申告する表現を残さない
+- schema/API/実装側でparameterのキー集合を取得できる場合は、テストでeventごとのキー集合をexactに検証する。文言だけのテストにせず、実装契約の変更を検出できるようにする
+- telemetry/privacy変更がない作業では、この検証をN/Aとして扱い、N/A理由を独立reviewのinputsへ記録する
 
 ## Change Scope and Completeness
 
@@ -117,6 +124,7 @@ status import_config_status NOT NULL DEFAULT 'active'
 - 実装完了後に必ずlint/build/testを実行し、エラーが発生しなくなるまで繰り返し修正を行う
   - testやlintの実行はciのコマンドを参照して実行する
   - lintのエラーの場合まずは自動修正を試みる
+- 変更種別に応じたdomain-specific verificationを実行し、適用対象外の場合はN/A理由を独立reviewのinputsへ記録する
 - 実現した仕様を最後に簡潔に説明する
 - 他のskillが同時にloadされている場合、そのskillの **禁止事項** を完了前チェックに含めること
 - skill違反を見つけた状態で「完了」扱いすることを禁じる。違反がある場合は必ず修正を優先すること
