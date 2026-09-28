@@ -76,6 +76,13 @@ function mergeCandidateIntoMain(repo) {
   git(repo, ['fetch', '-q', 'origin', 'main'])
 }
 
+function squashMergeCandidateIntoMain(repo) {
+  git(repo, ['merge', '--squash', 'feature'])
+  git(repo, ['commit', '-qm', 'squash merge feature'])
+  git(repo, ['push', '-q', 'origin', 'main'])
+  git(repo, ['fetch', '-q', 'origin', 'main'])
+}
+
 test('removes a clean merged worktree and its local branch in apply mode', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-merged-'))
   try {
@@ -103,6 +110,52 @@ test('removes a clean merged worktree and its local branch in apply mode', async
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     const lockExists = await access(path.join(repo, '.git', 'clean-merged-worktrees.lock')).then(() => true).catch(() => false)
     assert.equal(lockExists, false)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('removes the local branch after a GitHub-confirmed squash merge', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-squash-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    squashMergeCandidateIntoMain(repo)
+    const mergeCommit = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeGh = path.join(fakeBin, 'gh')
+    await writeFile(fakeGh, `#!/bin/sh
+set -eu
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  exit 0
+fi
+exit 1
+`)
+    await chmod(fakeGh, 0o755)
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].reason, 'merged')
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    const listing = git(repo, ['worktree', 'list', '--porcelain']).stdout
+    assert.doesNotMatch(listing, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }

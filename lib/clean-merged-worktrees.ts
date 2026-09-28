@@ -791,24 +791,37 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'branch-still-used', evidence })
       continue
     }
-    if (evidence.method !== 'ancestry') {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-retained', evidence, branch_delete_method: 'retained-non-ancestry-branch', ignored_files_removed: ignoredFilesRemoved })
-      continue
-    }
     const refBeforeBranchDelete = git(realRepo, ['rev-parse', '--verify', item.branchRef])
     if (!refBeforeBranchDelete.ok || refBeforeBranchDelete.stdout.trim() !== item.head) {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-changed-and-retained', evidence, branch_delete_method: 'retained-after-oid-recheck', ignored_files_removed: ignoredFilesRemoved })
+      results.push({ ...base, action: 'error', reason: 'branch-head-changed-before-delete', detail: !refBeforeBranchDelete.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', item.branchRef], refBeforeBranchDelete) : `${item.branchRef} changed: ${refBeforeBranchDelete.stdout.trim()} != ${item.head}`, evidence })
       continue
     }
-    // `git branch -d` performs its own in-use and merged-at-execution checks. If the ref
-    // changes after our OID check, an unmerged replacement is refused; a merged replacement
-    // still satisfies this cleanup policy. Do not replace this with force/update-ref deletion.
-    const deleted = git(realRepo, ['branch', '-d', base.branch])
-    if (!deleted.ok) {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-in-use-or-unmerged-and-retained', detail: deleted.stderr.trim(), evidence, branch_delete_method: 'git-branch-d-refused', ignored_files_removed: ignoredFilesRemoved })
+    // A squash/rebase merge has valid GitHub merge evidence even when the PR head
+    // is not an ancestor of the default branch. Delete that exact local ref with
+    // compare-and-delete semantics instead of using `git branch -D`.
+    const branchDelete = evidence.method === 'ancestry'
+      ? git(realRepo, ['branch', '-d', base.branch])
+      : git(realRepo, ['update-ref', '-d', item.branchRef, item.head])
+    const branchDeleteMethod = evidence.method === 'ancestry'
+      ? 'git-branch-d-with-worktree-and-merge-safety'
+      : 'git-update-ref-cas-with-github-merge-evidence'
+    if (!branchDelete.ok) {
+      results.push({
+        ...base,
+        action: 'error',
+        reason: 'branch-delete-failed',
+        detail: commandDiagnostic('git', evidence.method === 'ancestry' ? ['-C', realRepo, 'branch', '-d', base.branch] : ['-C', realRepo, 'update-ref', '-d', item.branchRef, item.head], branchDelete),
+        evidence,
+        branch_delete_method: branchDeleteMethod,
+      })
       continue
     }
-    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: 'git-branch-d-with-worktree-and-merge-safety', ignored_files_removed: ignoredFilesRemoved })
+    const branchAfterDelete = git(realRepo, ['show-ref', '--verify', '--quiet', item.branchRef])
+    if (branchAfterDelete.ok) {
+      results.push({ ...base, action: 'error', reason: 'branch-delete-unverified', detail: `${item.branchRef} still exists after ${branchDeleteMethod}`, evidence, branch_delete_method: branchDeleteMethod })
+      continue
+    }
+    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchDeleteMethod, ignored_files_removed: ignoredFilesRemoved })
   }
   return results
 }
