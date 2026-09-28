@@ -11,7 +11,7 @@ import { loadCleanMergedWorktreesConfig } from './clean-merged-worktrees-config.
 const config = loadCleanMergedWorktreesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-worktrees [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Ignored files are preserved and reported as a skip.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, or exactly matches a merged GitHub PR commit. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-worktrees [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, or exactly matches a merged GitHub PR commit. Remote branches are never deleted.\n`)
 }
 
 function run(command, args, options = {}) {
@@ -574,10 +574,6 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'ignored-files-query-failed', detail: commandDiagnostic('git', ['-C', candidate, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredBeforeQuarantine) })
       continue
     }
-    if (ignoredBeforeQuarantine.stdout.length > 0) {
-      results.push({ ...base, action: 'skip', reason: 'ignored-files-present', detail: ignoredFilesDetail(ignoredBeforeQuarantine) })
-      continue
-    }
 
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
     let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
@@ -622,7 +618,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       continue
     }
     if (!apply) {
-      results.push({ ...base, action: 'would-delete', reason: 'merged', evidence, compose })
+      results.push({ ...base, action: 'would-delete', reason: 'merged', evidence, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined })
       continue
     }
     const quarantine = path.join(realAllowedRoot, `.cleanup-${path.basename(candidate)}-${randomBytes(16).toString('hex')}`)
@@ -662,11 +658,13 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       })
       continue
     }
-    if (ignoredAfterQuarantine.stdout.length > 0) {
-      const restored = restoreQuarantine()
-      results.push({ ...base, action: 'error', reason: 'worktree-became-ignored-before-remove', detail: `${ignoredFilesDetail(ignoredAfterQuarantine)}; ${appendRestoreDiagnostic('ignored files appeared after quarantine', 'git', ['-C', realRepo, 'worktree', 'move', quarantine, candidate], restored)}`, evidence })
-      continue
-    }
+    const ignoredFilesPresent = ignoredBeforeQuarantine.stdout.length > 0 || ignoredAfterQuarantine.stdout.length > 0
+    const ignoredFilesRemoved = ignoredFilesPresent
+      ? {
+          before_quarantine: ignoredFilesDetail(ignoredBeforeQuarantine),
+          after_quarantine: ignoredFilesDetail(ignoredAfterQuarantine),
+        }
+      : undefined
     const statusAfterQuarantine = git(quarantine, ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
     const headAfterQuarantine = git(quarantine, ['rev-parse', '--verify', 'HEAD'])
     const branchAfterQuarantine = git(quarantine, ['symbolic-ref', '-q', 'HEAD'])
@@ -701,10 +699,85 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
+    if (ignoredFilesPresent) {
+      const cleanArgs = ['clean', '-ffdX']
+      const cleaned = git(quarantine, cleanArgs)
+      if (!cleaned.ok) {
+        const restored = restoreQuarantine()
+        results.push({
+          ...base,
+          action: 'error',
+          reason: 'ignored-files-clean-failed',
+          detail: appendRestoreDiagnostic(commandDiagnostic('git', ['-C', quarantine, ...cleanArgs], cleaned), 'git', ['-C', realRepo, 'worktree', 'move', quarantine, candidate], restored),
+          evidence,
+          ignored_files_observed: ignoredFilesRemoved,
+        })
+        continue
+      }
+      const ignoredAfterClean = ignoredFiles(quarantine)
+      const statusAfterClean = git(quarantine, ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
+      if (!ignoredAfterClean.ok || ignoredAfterClean.stdout.length > 0 || !statusAfterClean.ok || statusAfterClean.stdout.length > 0) {
+        const restored = restoreQuarantine()
+        const cleanVerification = !ignoredAfterClean.ok
+          ? commandDiagnostic('git', ['-C', quarantine, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredAfterClean)
+          : !statusAfterClean.ok
+            ? commandDiagnostic('git', ['-C', quarantine, '-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], statusAfterClean)
+            : `ignored files remain after clean: ${ignoredFilesDetail(ignoredAfterClean)}; status is not clean after clean`
+        results.push({
+          ...base,
+          action: 'error',
+          reason: 'ignored-files-clean-unverified',
+          detail: appendRestoreDiagnostic(cleanVerification, 'git', ['-C', realRepo, 'worktree', 'move', quarantine, candidate], restored),
+          evidence,
+          ignored_files_observed: ignoredFilesRemoved,
+        })
+        continue
+      }
+      const headAfterClean = git(quarantine, ['rev-parse', '--verify', 'HEAD'])
+      const branchAfterClean = git(quarantine, ['symbolic-ref', '-q', 'HEAD'])
+      const refAfterClean = git(realRepo, ['rev-parse', '--verify', item.branchRef])
+      const defaultAfterClean = git(realRepo, ['rev-parse', '--verify', defaultInfo.ref])
+      const listingAfterClean = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
+      const registeredAfterClean = listingAfterClean.ok
+        ? parseWorktrees(listingAfterClean.stdout).find((worktree) => path.resolve(worktree.path) === path.resolve(quarantine))
+        : null
+      let realQuarantineAfterClean = null
+      try {
+        realQuarantineAfterClean = await fs.realpath(quarantine)
+      } catch {
+        // Reported by the post-clean identity check below.
+      }
+      const remoteAfterClean = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
+      const mergeEvidenceAfterClean = evidence.method === 'ancestry'
+        ? git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
+        : git(realRepo, ['merge-base', '--is-ancestor', evidence.merge_commit, defaultInfo.ref]).ok
+      const postCleanIssues = []
+      if (!headAfterClean.ok || headAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!headAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'rev-parse', '--verify', 'HEAD'], headAfterClean) : `HEAD changed after ignored cleanup: ${headAfterClean.stdout.trim()} != ${item.head}`)
+      if (!branchAfterClean.ok || branchAfterClean.stdout.trim() !== item.branchRef) postCleanIssues.push(!branchAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'symbolic-ref', '-q', 'HEAD'], branchAfterClean) : `branch changed after ignored cleanup: ${branchAfterClean.stdout.trim()} != ${item.branchRef}`)
+      if (!refAfterClean.ok || refAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!refAfterClean.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', item.branchRef], refAfterClean) : `branch ref changed after ignored cleanup: ${refAfterClean.stdout.trim()} != ${item.head}`)
+      if (!defaultAfterClean.ok || defaultAfterClean.stdout.trim() !== defaultHead) postCleanIssues.push(!defaultAfterClean.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', defaultInfo.ref], defaultAfterClean) : `default ref changed after ignored cleanup: ${defaultAfterClean.stdout.trim()} != ${defaultHead}`)
+      if (!listingAfterClean.ok) postCleanIssues.push(commandDiagnostic('git', ['-C', realRepo, 'worktree', 'list', '--porcelain', '-z'], listingAfterClean))
+      else if (!registeredAfterClean || registeredAfterClean.locked !== undefined) postCleanIssues.push('quarantine worktree registration changed or became locked after ignored cleanup')
+      if (realQuarantineAfterClean !== path.resolve(quarantine) || !isWithin(realQuarantineAfterClean, realAllowedRoot)) postCleanIssues.push(`quarantine path changed after ignored cleanup: ${realQuarantineAfterClean || '<missing>'}`)
+      if (!remoteAfterClean.ok || remoteAfterClean.oid !== defaultHead) postCleanIssues.push(remoteAfterClean.ok ? `remote default changed after ignored cleanup: ${remoteAfterClean.oid} != ${defaultHead}` : remoteAfterClean.error)
+      if (!mergeEvidenceAfterClean) postCleanIssues.push('merge evidence is no longer valid after ignored cleanup')
+      if (postCleanIssues.length > 0) {
+        const restored = restoreQuarantine()
+        results.push({
+          ...base,
+          action: 'error',
+          reason: 'worktree-state-changed-after-ignored-clean',
+          detail: appendRestoreDiagnostic(postCleanIssues.join('; '), 'git', ['-C', realRepo, 'worktree', 'move', quarantine, candidate], restored),
+          evidence,
+          ignored_files_observed: ignoredFilesRemoved,
+        })
+        continue
+      }
+    }
     const removed = git(realRepo, ['worktree', 'remove', quarantine])
     if (!removed.ok) {
       const restored = restoreQuarantine()
-      results.push({ ...base, action: 'error', reason: 'worktree-remove-failed', detail: `${removed.stderr.trim()}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
+      results.push({ ...base, action: 'error', reason: 'worktree-remove-failed', detail: `${commandDiagnostic('git', ['-C', realRepo, 'worktree', 'remove', quarantine], removed)}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence, ignored_files_removed: ignoredFilesRemoved })
       continue
     }
     const verifyListing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
@@ -719,12 +792,12 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       continue
     }
     if (evidence.method !== 'ancestry') {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-retained', evidence, branch_delete_method: 'retained-non-ancestry-branch' })
+      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-retained', evidence, branch_delete_method: 'retained-non-ancestry-branch', ignored_files_removed: ignoredFilesRemoved })
       continue
     }
     const refBeforeBranchDelete = git(realRepo, ['rev-parse', '--verify', item.branchRef])
     if (!refBeforeBranchDelete.ok || refBeforeBranchDelete.stdout.trim() !== item.head) {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-changed-and-retained', evidence, branch_delete_method: 'retained-after-oid-recheck' })
+      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-changed-and-retained', evidence, branch_delete_method: 'retained-after-oid-recheck', ignored_files_removed: ignoredFilesRemoved })
       continue
     }
     // `git branch -d` performs its own in-use and merged-at-execution checks. If the ref
@@ -732,16 +805,16 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     // still satisfies this cleanup policy. Do not replace this with force/update-ref deletion.
     const deleted = git(realRepo, ['branch', '-d', base.branch])
     if (!deleted.ok) {
-      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-in-use-or-unmerged-and-retained', detail: deleted.stderr.trim(), evidence, branch_delete_method: 'git-branch-d-refused' })
+      results.push({ ...base, action: 'deleted', reason: 'merged-worktree-removed-branch-in-use-or-unmerged-and-retained', detail: deleted.stderr.trim(), evidence, branch_delete_method: 'git-branch-d-refused', ignored_files_removed: ignoredFilesRemoved })
       continue
     }
-    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: 'git-branch-d-with-worktree-and-merge-safety' })
+    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: 'git-branch-d-with-worktree-and-merge-safety', ignored_files_removed: ignoredFilesRemoved })
   }
   return results
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'dirty', 'locked', 'ignored-files-present', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'worktree-became-ignored-before-remove', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const importantReasons = new Set(['empty-repository', 'prunable', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
   const lines = ['## merged worktree cleanup']
@@ -749,7 +822,10 @@ function renderCron(summary) {
     const target = item.path || item.repo
     const evidence = item.evidence?.pr ? ` (${item.evidence.pr})` : ''
     const detail = item.detail ? ` — ${item.detail.replaceAll(/\s+/g, ' ').trim()}` : ''
-    lines.push(`- ${item.action}: ${target} — ${item.reason}${evidence}${detail}`)
+    const ignored = item.ignored_files_removed
+      ? ` — ignored removed: ${item.ignored_files_removed.before_quarantine} before quarantine, ${item.ignored_files_removed.after_quarantine} after quarantine`
+      : ''
+    lines.push(`- ${item.action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
   }
   const pruneSummary = summary.mode === 'dry-run' ? `prune予定: ${summary.would_prune}` : `prune済み: ${summary.pruned}`
   lines.push('', `削除: ${summary.deleted} / ${pruneSummary} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item) => item.action === 'skip').length}`)
