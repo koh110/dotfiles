@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -83,6 +83,15 @@ function squashMergeCandidateIntoMain(repo) {
   git(repo, ['fetch', '-q', 'origin', 'main'])
 }
 
+function mergeRemoteWithoutRefreshingLocalDefault(repo) {
+  const base = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+  git(repo, ['merge', '--no-ff', '-qm', 'merge feature remotely', 'feature'])
+  git(repo, ['push', '-q', 'origin', 'main'])
+  git(repo, ['reset', '--hard', '-q', base])
+  git(repo, ['update-ref', 'refs/remotes/origin/main', base])
+  return { base }
+}
+
 test('removes a clean merged worktree and its local branch in apply mode', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-merged-'))
   try {
@@ -110,6 +119,141 @@ test('removes a clean merged worktree and its local branch in apply mode', async
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     const lockExists = await access(path.join(repo, '.git', 'clean-merged-worktrees.lock')).then(() => true).catch(() => false)
     assert.equal(lockExists, false)
+    const headPath = path.resolve(repo, git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'HEAD']).stdout.trim())
+    await assert.rejects(access(`${headPath}.lock`))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('refreshes a stale clean default branch before applying cleanup', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const { base } = mergeRemoteWithoutRefreshingLocalDefault(repo)
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), base)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].reason, 'merged')
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), git(repo, ['ls-remote', 'origin', 'refs/heads/main']).stdout.split('\t', 1)[0])
+    assert.equal(git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim(), base)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('fetches a default branch when it is not checked out in a worktree', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-fetch-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    git(repo, ['switch', '-q', '-c', 'other'])
+    git(repo, ['push', '-q', 'origin', 'feature:main'])
+    git(repo, ['update-ref', '-d', 'refs/remotes/origin/main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json', '--default-branch', 'main'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].branch_delete_method, 'git-branch-d-in-authoritative-detached-worktree')
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/remotes/origin/main']).status, 0)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('fails closed for unregistered content below the worktree directory', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-unregistered-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const unrelatedPath = path.join(repo, '.worktree', 'unregistered-note')
+    await writeFile(unrelatedPath, 'do not ignore this\n')
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.match(summary.results[0].detail, /default branch worktree is dirty/)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('fails closed when the default branch worktree is dirty', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-dirty-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    await writeFile(path.join(repo, 'default-branch-dirty.txt'), 'do not overwrite\n')
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.match(summary.results[0].detail, /default branch worktree is dirty/)
+    assert.equal(git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('does not refresh a stale default branch during dry-run', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-dry-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    const { base } = mergeRemoteWithoutRefreshingLocalDefault(repo)
+
+    const result = run(entrypoint, ['--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'local-default-stale')
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), base)
+    assert.equal(git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim(), base)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
@@ -156,6 +300,165 @@ exit 1
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     const listing = git(repo, ['worktree', 'list', '--porcelain']).stdout
     assert.doesNotMatch(listing, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('holds the branch ref transaction while fencing concurrent branch checkout', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-branch-race-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    squashMergeCandidateIntoMain(repo)
+    const mergeCommit = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = run('which', ['git']).stdout.trim()
+    const racePath = path.join(repo, '.worktree', 'race')
+    const raceStatus = path.join(fixtureRoot, 'race-status')
+    const raceOutput = path.join(fixtureRoot, 'race-output')
+    const transactionMarker = path.join(fixtureRoot, 'transaction-started')
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+set -u
+real_git=${JSON.stringify(realGit)}
+repo=${JSON.stringify(repo)}
+race_path=${JSON.stringify(racePath)}
+race_status=${JSON.stringify(raceStatus)}
+race_output=${JSON.stringify(raceOutput)}
+transaction_marker=${JSON.stringify(transactionMarker)}
+if [ "$1" = "-C" ]; then
+  invoked_repo="$2"
+  shift 2
+else
+  printf '%s\\n' 'unexpected git invocation' >&2
+  exit 99
+fi
+if [ "$1" = "update-ref" ] && [ "$2" = "--stdin" ]; then
+  touch "$transaction_marker"
+  exec "$real_git" -C "$invoked_repo" "$@"
+fi
+if [ "$1" = "worktree" ] && [ "$2" = "list" ] && [ -e "$transaction_marker" ]; then
+  "$real_git" -C "$repo" worktree add --force "$race_path" feature >"$race_output" 2>&1
+  printf '%s' "$?" >"$race_status"
+fi
+exec "$real_git" -C "$invoked_repo" "$@"
+`)
+    await chmod(fakeGit, 0o755)
+    const fakeGh = path.join(fakeBin, 'gh')
+    await writeFile(fakeGh, `#!/bin/sh
+set -eu
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  exit 0
+fi
+exit 1
+`)
+    await chmod(fakeGh, 0o755)
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    let raceStatusValue = null
+    for (let attempt = 0; attempt < 100 && raceStatusValue === null; attempt += 1) {
+      try {
+        raceStatusValue = (await readFile(raceStatus, 'utf8')).trim()
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
+    assert.notEqual(raceStatusValue, null)
+    assert.notEqual(raceStatusValue, '0')
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).stdout.includes(`${path.sep}race\n`), false)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores the branch when post-delete ref verification is indeterminate', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-branch-verify-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    squashMergeCandidateIntoMain(repo)
+    const mergeCommit = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = run('which', ['git']).stdout.trim()
+    const verificationMarker = path.join(fixtureRoot, 'branch-delete-committed')
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+set -eu
+real_git=${JSON.stringify(realGit)}
+marker=${JSON.stringify(verificationMarker)}
+if [ "$1" = "-C" ]; then
+  repo="$2"
+  shift 2
+else
+  printf '%s\\n' 'unexpected git invocation' >&2
+  exit 99
+fi
+if [ "$1" = "update-ref" ] && [ "$2" = "--stdin" ]; then
+  "$real_git" -C "$repo" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then touch "$marker"; fi
+  exit "$status"
+fi
+if [ -f "$marker" ] && [ "$1" = "show-ref" ] && [ "$2" = "--verify" ] && [ "$3" = "--quiet" ] && [ "$4" = "refs/heads/feature" ]; then
+  printf '%s\\n' 'injected post-delete verification failure' >&2
+  exit 2
+fi
+exec "$real_git" -C "$repo" "$@"
+`)
+    await chmod(fakeGit, 0o755)
+    const fakeGh = path.join(fakeBin, 'gh')
+    await writeFile(fakeGh, `#!/bin/sh
+set -eu
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  exit 0
+fi
+exit 1
+`)
+    await chmod(fakeGh, 0o755)
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'branch-delete-unverified')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }

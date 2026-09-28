@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -33,8 +33,259 @@ function run(command, args, options = {}) {
   }
 }
 
-function git(repo, args) {
-  return run('git', ['-C', repo, ...args])
+function git(repo, args, options = {}) {
+  return run('git', ['-C', repo, ...args], options)
+}
+
+async function deleteBranchRefWithCas(repo, ref, expectedOid) {
+  const commonDir = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!commonDir.ok || !path.isAbsolute(commonDir.stdout.trim())) {
+    return { ok: false, committed: false, error: !commonDir.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], commonDir) : `git common directory is not absolute: ${commonDir.stdout.trim() || '<empty>'}` }
+  }
+  const lockPath = path.join(commonDir.stdout.trim(), `${ref}.lock`)
+  const command = ['-C', repo, 'update-ref', '--stdin']
+  let stdout = ''
+  let stderr = ''
+  let launchError = null
+  let closed = false
+  let closeResult
+  const child = spawn('git', command, {
+    env: config.environment,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => { stdout += chunk })
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const finished = new Promise((resolve) => {
+    child.once('error', (error) => {
+      launchError = error.message
+      closed = true
+      closeResult = { status: null, signal: null }
+      resolve(closeResult)
+    })
+    child.once('close', (status, signal) => {
+      closed = true
+      closeResult = { status, signal }
+      resolve(closeResult)
+    })
+  })
+  const result = () => ({ ok: closed && closeResult?.status === 0, status: closeResult?.status ?? null, stdout, stderr, error: launchError })
+  const abort = async () => {
+    if (!closed) {
+      try {
+        child.stdin.write('abort\n')
+        child.stdin.end()
+      } catch {
+        child.kill('SIGKILL')
+      }
+      await finished
+    }
+  }
+  child.stdin.write(`start\ndelete ${ref} ${expectedOid}\nprepare\n`)
+  const lockDeadline = Date.now() + 30_000
+  while (!closed && Date.now() < lockDeadline) {
+    try {
+      await fs.lstat(lockPath)
+      break
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+  if (closed || !(await fs.lstat(lockPath).then(() => true).catch(() => false))) {
+    await abort()
+    const failed = result()
+    return { ok: false, committed: false, error: `${commandDiagnostic('git', command, failed)}; ref transaction lock was not acquired: ${lockPath}` }
+  }
+  const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+  if (!fencedListing.ok) {
+    await abort()
+    const failed = result()
+    return { ok: false, committed: false, error: `${commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], fencedListing)}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
+  }
+  if (parseWorktrees(fencedListing.stdout).some((worktree) => worktree.branchRef === ref)) {
+    await abort()
+    const failed = result()
+    return { ok: false, committed: false, error: `${ref} became used by another worktree while its ref lock was held${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
+  }
+  child.stdin.write('commit\n')
+  child.stdin.end()
+  await finished
+  const committed = result()
+  return { ...committed, committed: committed.ok }
+}
+
+function verifyRefAbsent(repo, ref) {
+  const result = git(repo, ['show-ref', '--verify', '--quiet', ref])
+  if (result.ok) return { ok: true, absent: false }
+  if (result.status === 1 && !result.stderr && !result.error) return { ok: true, absent: true }
+  return { ok: false, error: commandDiagnostic('git', ['-C', repo, 'show-ref', '--verify', '--quiet', ref], result) }
+}
+
+function restoreBranchRef(repo, ref, expectedOid) {
+  const restored = git(repo, ['update-ref', ref, expectedOid, ''])
+  if (!restored.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, 'update-ref', ref, expectedOid, ''], restored) }
+  const readBack = git(repo, ['rev-parse', '--verify', ref])
+  if (!readBack.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', ref], readBack) }
+  if (readBack.stdout.trim() !== expectedOid) return { ok: false, error: `${ref} restored to ${readBack.stdout.trim()} instead of ${expectedOid}` }
+  return { ok: true }
+}
+
+async function acquireWorktreeHeadLocks(worktreeRecords) {
+  const acquired = []
+  async function release() {
+    const errors = []
+    for (const lock of acquired.reverse()) {
+      let current
+      try {
+        current = await fs.lstat(lock.path)
+      } catch (error) {
+        errors.push(`${lock.path}: cannot verify lock before release: ${errorText(error)}`)
+        try { await lock.handle.close() } catch (closeError) { errors.push(`${lock.path}: ${errorText(closeError)}`) }
+        continue
+      }
+      if (!sameFileIdentity(current, lock.identity)) {
+        errors.push(`${lock.path}: lock identity changed before release`)
+        try { await lock.handle.close() } catch (closeError) { errors.push(`${lock.path}: ${errorText(closeError)}`) }
+        continue
+      }
+      try {
+        await fs.unlink(lock.path)
+      } catch (error) {
+        errors.push(`${lock.path}: ${errorText(error)}`)
+      }
+      try {
+        await lock.handle.close()
+      } catch (error) {
+        errors.push(`${lock.path}: ${errorText(error)}`)
+      }
+    }
+    return errors.length === 0 ? { ok: true } : { ok: false, error: errors.join('; ') }
+  }
+
+  for (const worktree of worktreeRecords) {
+    const worktreePath = path.resolve(worktree.path)
+    const headResult = git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-path', 'HEAD'])
+    if (!headResult.ok || !path.isAbsolute(headResult.stdout.trim())) {
+      const released = await release()
+      return {
+        ok: false,
+        error: `${!headResult.ok ? commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--path-format=absolute', '--git-path', 'HEAD'], headResult) : `git returned a non-absolute HEAD path: ${headResult.stdout.trim() || '<empty>'}`}${released.ok ? '' : `; lock release failed: ${released.error}`}`,
+      }
+    }
+    const lockPath = `${headResult.stdout.trim()}.lock`
+    const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0)
+    let handle
+    let identity
+    try {
+      handle = await fs.open(lockPath, flags, 0o600)
+      identity = await handle.stat()
+      await handle.writeFile(`${JSON.stringify({ pid: process.pid, worktree: worktreePath })}\n`, 'utf8')
+      acquired.push({ path: lockPath, handle, identity })
+    } catch (error) {
+      if (handle) {
+        try {
+          const current = await fs.lstat(lockPath)
+          if (identity && sameFileIdentity(current, identity)) await fs.unlink(lockPath)
+        } catch {
+          // Preserve an uncertain lock for operator inspection.
+        }
+      }
+      try {
+        if (handle) await handle.close()
+      } catch {
+        // Preserve the acquisition failure as the actionable diagnostic.
+      }
+      const released = await release()
+      return {
+        ok: false,
+        error: `${lockPath}: ${errorText(error)}${released.ok ? '' : `; lock release failed: ${released.error}`}`,
+      }
+    }
+  }
+  return { ok: true, release }
+}
+
+async function deleteBranchWithAncestryEvidence(repo, branchName, defaultRef, allowedRoot) {
+  const temporaryPath = path.join(allowedRoot, `.cleanup-branch-fence-${randomBytes(16).toString('hex')}`)
+  if (!isWithin(temporaryPath, allowedRoot)) return { ok: false, committed: false, error: `temporary branch-fence path escaped allowed root: ${temporaryPath}` }
+  const added = git(repo, ['worktree', 'add', '--detach', temporaryPath, defaultRef])
+  if (!added.ok) return { ok: false, committed: false, error: commandDiagnostic('git', ['-C', repo, 'worktree', 'add', '--detach', temporaryPath, defaultRef], added) }
+  const deleted = git(temporaryPath, ['branch', '-d', branchName])
+  const removed = git(repo, ['worktree', 'remove', temporaryPath])
+  const cleanupDetail = removed.ok ? '' : `; temporary branch-fence worktree removal failed: ${commandDiagnostic('git', ['-C', repo, 'worktree', 'remove', temporaryPath], removed)}`
+  if (!deleted.ok) return { ok: false, committed: false, error: `${commandDiagnostic('git', ['-C', temporaryPath, 'branch', '-d', branchName], deleted)}${cleanupDetail}` }
+  if (!removed.ok) return { ok: false, committed: true, error: cleanupDetail.slice(2) }
+  return { ok: true, committed: true }
+}
+
+async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expectedHead, branchName, defaultRef, evidenceMethod, allowedRoot) {
+  const branchDeleteMethod = evidenceMethod === 'ancestry'
+    ? 'git-branch-d-in-authoritative-detached-worktree'
+    : 'git-update-ref-transaction-cas-with-merge-evidence'
+  const headLocks = await acquireWorktreeHeadLocks(worktreeRecords)
+  if (!headLocks.ok) return { ok: false, reason: 'worktree-head-lock-failed', detail: headLocks.error, branch_delete_method: branchDeleteMethod }
+  let outcome = { ok: false, reason: 'branch-delete-failed', detail: 'branch deletion did not run', branch_delete_method: branchDeleteMethod }
+  try {
+    const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+    if (!fencedListing.ok) {
+      outcome = { ok: false, reason: 'worktree-list-before-branch-delete-failed', detail: commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], fencedListing), branch_delete_method: branchDeleteMethod }
+    } else if (parseWorktrees(fencedListing.stdout).some((worktree) => worktree.branchRef === branchRef)) {
+      outcome = { ok: false, reason: 'branch-still-used', detail: `${branchRef} is used by another worktree`, branch_delete_method: branchDeleteMethod }
+    } else {
+      const refBeforeDelete = git(repo, ['rev-parse', '--verify', branchRef])
+      if (!refBeforeDelete.ok || refBeforeDelete.stdout.trim() !== expectedHead) {
+        outcome = { ok: false, reason: 'branch-head-changed-before-delete', detail: !refBeforeDelete.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], refBeforeDelete) : `${branchRef} changed: ${refBeforeDelete.stdout.trim()} != ${expectedHead}`, branch_delete_method: branchDeleteMethod }
+      } else {
+        const branchDelete = evidenceMethod === 'ancestry'
+          ? await deleteBranchWithAncestryEvidence(repo, branchName, defaultRef, allowedRoot)
+          : await deleteBranchRefWithCas(repo, branchRef, expectedHead)
+        if (!branchDelete.ok) {
+          let restoreDetail = ''
+          if (branchDelete.committed) {
+            const restored = restoreBranchRef(repo, branchRef, expectedHead)
+            restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+          } else if (evidenceMethod !== 'ancestry') {
+            const branchAfterFailedDelete = verifyRefAbsent(repo, branchRef)
+            if (!branchAfterFailedDelete.ok || branchAfterFailedDelete.absent) {
+              const restored = restoreBranchRef(repo, branchRef, expectedHead)
+              restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+            }
+            if (!branchAfterFailedDelete.ok) restoreDetail = `${restoreDetail}; ref state after failed delete is indeterminate: ${branchAfterFailedDelete.error}`
+          }
+          outcome = { ok: false, reason: 'branch-delete-failed', detail: `${branchDelete.error || commandDiagnostic('git', ['-C', repo, 'update-ref', '--stdin'], branchDelete)}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
+        } else {
+          const branchAfterDelete = verifyRefAbsent(repo, branchRef)
+          const listingAfterBranchDelete = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+          const branchUsedAfterDelete = listingAfterBranchDelete.ok && parseWorktrees(listingAfterBranchDelete.stdout).some((worktree) => worktree.branchRef === branchRef)
+          if (!branchAfterDelete.ok || !listingAfterBranchDelete.ok || !branchAfterDelete.absent || branchUsedAfterDelete) {
+            const issues = []
+            if (!branchAfterDelete.ok) issues.push(branchAfterDelete.error)
+            else if (!branchAfterDelete.absent) issues.push(`${branchRef} still exists after ${branchDeleteMethod}`)
+            if (!listingAfterBranchDelete.ok) issues.push(commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], listingAfterBranchDelete))
+            else if (branchUsedAfterDelete) issues.push(`${branchRef} became used by another worktree after ${branchDeleteMethod}`)
+            const restored = restoreBranchRef(repo, branchRef, expectedHead)
+            const restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+            outcome = { ok: false, reason: 'branch-delete-unverified', detail: `${issues.filter(Boolean).join('; ')}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
+          } else {
+            outcome = { ok: true, branch_delete_method: branchDeleteMethod }
+          }
+        }
+      }
+    }
+  } finally {
+    const released = await headLocks.release()
+    if (!released.ok) {
+      if (outcome.ok) {
+        const restored = restoreBranchRef(repo, branchRef, expectedHead)
+        const restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+        outcome = { ok: false, reason: 'worktree-head-lock-release-failed', detail: `${released.error}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
+      } else {
+        outcome = { ...outcome, reason: 'worktree-head-lock-release-failed', detail: `${outcome.detail}; ${released.error}` }
+      }
+    }
+  }
+  return outcome
 }
 
 function sameFileIdentity(left, right) {
@@ -263,6 +514,43 @@ function pruneWorktreeRegistrations(repo, apply) {
   return result.ok
     ? { ok: true, args, output: result.stdout.trim() }
     : { ok: false, args, error: commandDiagnostic('git', ['-C', repo, ...args], result) }
+}
+
+function defaultBranchStatusArgs(defaultPath, worktrees) {
+  const exclusions = []
+  for (const worktree of worktrees) {
+    const candidatePath = path.resolve(worktree.path)
+    if (!isWithin(candidatePath, defaultPath)) continue
+    const relative = path.relative(defaultPath, candidatePath)
+    if (relative) exclusions.push(`:(exclude)${relative}`)
+  }
+  return ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.', ...exclusions]
+}
+
+async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
+  const defaultBranchRef = `refs/heads/${defaultInfo.name}`
+  const defaultWorktree = worktrees.find((item) => item.branchRef === defaultBranchRef)
+  if (defaultWorktree) {
+    const defaultPath = path.resolve(defaultWorktree.path)
+    const statusArgs = defaultBranchStatusArgs(defaultPath, worktrees)
+    const status = git(defaultPath, statusArgs)
+    if (!status.ok) {
+      return { ok: false, code: 'default-branch-refresh-failed', error: commandDiagnostic('git', ['-C', defaultPath, ...statusArgs], status) }
+    }
+    if (status.stdout.length > 0) {
+      return { ok: false, code: 'default-branch-refresh-failed', error: `default branch worktree is dirty: ${defaultPath}` }
+    }
+  }
+
+  // Cleanup only needs the authoritative remote-tracking ref. Do not pull/rebase
+  // an existing worktree here: the repository lock cannot fence an unrelated
+  // checkout, so a concurrent branch switch could otherwise mutate the wrong
+  // branch. The dedicated refresh job remains responsible for worktree rebase.
+  const args = ['fetch', '--no-tags', 'origin', `refs/heads/${defaultInfo.name}:refs/remotes/origin/${defaultInfo.name}`]
+  const fetched = git(repo, args, { timeout: 120_000 })
+  return fetched.ok
+    ? { ok: true, refreshed: true, mode: 'fetch' }
+    : { ok: false, code: 'default-branch-refresh-failed', error: commandDiagnostic('git', ['-C', repo, ...args], fetched) }
 }
 
 function worktreeRegistrationResult(repo, item, action, detail = item.prunable) {
@@ -511,8 +799,14 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     return [...results, { repo: realRepo, action: 'skip', reason: 'empty-repository' }]
   }
   if (candidateWorktrees.length === 0) return results
-  const defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
+  let defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
   if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found' }]
+  if (apply) {
+    const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
+    if (!refreshed.ok) return [...results, { repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error }]
+    defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
+    if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' }]
+  }
   const defaultHeadResult = git(realRepo, ['rev-parse', '--verify', defaultInfo.ref])
   if (!defaultHeadResult.ok) return [...results, { repo: realRepo, action: 'error', reason: 'default-ref-unreadable' }]
   const defaultHead = defaultHeadResult.stdout.trim()
@@ -786,42 +1080,13 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'worktree-remove-unverified', evidence })
       continue
     }
-    const branchStillUsed = parseWorktrees(verifyListing.stdout).some((worktree) => worktree.branchRef === item.branchRef)
-    if (branchStillUsed) {
-      results.push({ ...base, action: 'error', reason: 'branch-still-used', evidence })
+    const branchName = item.branchRef.startsWith('refs/heads/') ? item.branchRef.slice('refs/heads/'.length) : item.branchRef
+    const branchSafety = await deleteLocalBranchSafely(realRepo, parseWorktrees(verifyListing.stdout), item.branchRef, item.head, branchName, defaultInfo.ref, evidence.method, realAllowedRoot)
+    if (!branchSafety.ok) {
+      results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
       continue
     }
-    const refBeforeBranchDelete = git(realRepo, ['rev-parse', '--verify', item.branchRef])
-    if (!refBeforeBranchDelete.ok || refBeforeBranchDelete.stdout.trim() !== item.head) {
-      results.push({ ...base, action: 'error', reason: 'branch-head-changed-before-delete', detail: !refBeforeBranchDelete.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', item.branchRef], refBeforeBranchDelete) : `${item.branchRef} changed: ${refBeforeBranchDelete.stdout.trim()} != ${item.head}`, evidence })
-      continue
-    }
-    // A squash/rebase merge has valid GitHub merge evidence even when the PR head
-    // is not an ancestor of the default branch. Delete that exact local ref with
-    // compare-and-delete semantics instead of using `git branch -D`.
-    const branchDelete = evidence.method === 'ancestry'
-      ? git(realRepo, ['branch', '-d', base.branch])
-      : git(realRepo, ['update-ref', '-d', item.branchRef, item.head])
-    const branchDeleteMethod = evidence.method === 'ancestry'
-      ? 'git-branch-d-with-worktree-and-merge-safety'
-      : 'git-update-ref-cas-with-github-merge-evidence'
-    if (!branchDelete.ok) {
-      results.push({
-        ...base,
-        action: 'error',
-        reason: 'branch-delete-failed',
-        detail: commandDiagnostic('git', evidence.method === 'ancestry' ? ['-C', realRepo, 'branch', '-d', base.branch] : ['-C', realRepo, 'update-ref', '-d', item.branchRef, item.head], branchDelete),
-        evidence,
-        branch_delete_method: branchDeleteMethod,
-      })
-      continue
-    }
-    const branchAfterDelete = git(realRepo, ['show-ref', '--verify', '--quiet', item.branchRef])
-    if (branchAfterDelete.ok) {
-      results.push({ ...base, action: 'error', reason: 'branch-delete-unverified', detail: `${item.branchRef} still exists after ${branchDeleteMethod}`, evidence, branch_delete_method: branchDeleteMethod })
-      continue
-    }
-    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchDeleteMethod, ignored_files_removed: ignoredFilesRemoved })
+    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
   }
   return results
 }
