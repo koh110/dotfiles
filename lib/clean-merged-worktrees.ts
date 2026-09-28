@@ -57,6 +57,9 @@ async function deleteBranchRefWithCas(repo, ref, expectedOid) {
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (chunk) => { stdout += chunk })
   child.stderr.on('data', (chunk) => { stderr += chunk })
+  child.stdin.on('error', (error: Error) => {
+    launchError ||= error.message
+  })
   const finished = new Promise((resolve) => {
     child.once('error', (error) => {
       launchError = error.message
@@ -98,6 +101,11 @@ async function deleteBranchRefWithCas(repo, ref, expectedOid) {
     return { ok: false, committed: false, error: `${commandDiagnostic('git', command, failed)}; ref transaction lock was not acquired: ${lockPath}` }
   }
   const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  if (closed) {
+    const failed = result()
+    return { ok: false, committed: false, error: commandDiagnostic('git', command, failed) }
+  }
   if (!fencedListing.ok) {
     await abort()
     const failed = result()
@@ -209,14 +217,27 @@ async function acquireWorktreeHeadLocks(worktreeRecords) {
 async function deleteBranchWithAncestryEvidence(repo, branchName, defaultRef, allowedRoot) {
   const temporaryPath = path.join(allowedRoot, `.cleanup-branch-fence-${randomBytes(16).toString('hex')}`)
   if (!isWithin(temporaryPath, allowedRoot)) return { ok: false, committed: false, error: `temporary branch-fence path escaped allowed root: ${temporaryPath}` }
-  const added = git(repo, ['worktree', 'add', '--detach', temporaryPath, defaultRef])
-  if (!added.ok) return { ok: false, committed: false, error: commandDiagnostic('git', ['-C', repo, 'worktree', 'add', '--detach', temporaryPath, defaultRef], added) }
-  const deleted = git(temporaryPath, ['branch', '-d', branchName])
-  const removed = git(repo, ['worktree', 'remove', temporaryPath])
-  const cleanupDetail = removed.ok ? '' : `; temporary branch-fence worktree removal failed: ${commandDiagnostic('git', ['-C', repo, 'worktree', 'remove', temporaryPath], removed)}`
-  if (!deleted.ok) return { ok: false, committed: false, error: `${commandDiagnostic('git', ['-C', temporaryPath, 'branch', '-d', branchName], deleted)}${cleanupDetail}` }
-  if (!removed.ok) return { ok: false, committed: true, error: cleanupDetail.slice(2) }
-  return { ok: true, committed: true }
+  const added = git(repo, ['worktree', 'add', '--detach', '--no-checkout', temporaryPath, defaultRef])
+  if (!added.ok) {
+    const removed = git(repo, ['worktree', 'remove', '--force', temporaryPath])
+    const cleanupDetail = removed.ok ? '' : `; temporary branch-fence worktree removal failed: ${commandDiagnostic('git', ['-C', repo, 'worktree', 'remove', '--force', temporaryPath], removed)}`
+    return { ok: false, committed: false, error: `${commandDiagnostic('git', ['-C', repo, 'worktree', 'add', '--detach', '--no-checkout', temporaryPath, defaultRef], added)}${cleanupDetail}` }
+  }
+  let result
+  let cleanupError = null
+  try {
+    const deleted = git(temporaryPath, ['branch', '-d', branchName])
+    result = deleted.ok
+      ? { ok: true, committed: true }
+      : { ok: false, committed: false, error: commandDiagnostic('git', ['-C', temporaryPath, 'branch', '-d', branchName], deleted) }
+  } finally {
+    const removed = git(repo, ['worktree', 'remove', '--force', temporaryPath])
+    if (!removed.ok) cleanupError = commandDiagnostic('git', ['-C', repo, 'worktree', 'remove', '--force', temporaryPath], removed)
+  }
+  if (cleanupError) {
+    return { ok: false, committed: result?.committed === true, error: `${result?.error || 'temporary branch-fence branch deletion completed'}; temporary branch-fence worktree removal failed: ${cleanupError}` }
+  }
+  return result
 }
 
 async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expectedHead, branchName, defaultRef, evidenceMethod, allowedRoot) {
