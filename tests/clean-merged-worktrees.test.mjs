@@ -108,7 +108,7 @@ test('removes a clean merged worktree and its local branch in apply mode', async
   }
 })
 
-test('preserves ignored files and reports the merged worktree as a skip', async () => {
+test('removes ignored files from a disposable merged worktree', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-ignored-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
@@ -119,18 +119,64 @@ test('preserves ignored files and reports the merged worktree as a skip', async 
     const ignoredPath = path.join(worktree, 'build', 'output.bin')
     await mkdir(path.dirname(ignoredPath), { recursive: true })
     await writeFile(ignoredPath, 'local build output\n')
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
     const result = run(entrypoint, ['--apply', '--json'], {
-      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
     })
 
     assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     const summary = JSON.parse(result.stdout)
-    assert.equal(summary.deleted, 0)
+    assert.equal(summary.deleted, 1)
     assert.equal(summary.errors, 0)
-    assert.equal(summary.results[0].action, 'skip')
-    assert.equal(summary.results[0].reason, 'ignored-files-present')
-    assert.equal(await access(ignoredPath).then(() => true).catch(() => false), true)
-    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    assert.equal(summary.results[0].action, 'deleted')
+    assert.equal(summary.results[0].reason, 'merged')
+    assert.deepEqual(summary.results[0].ignored_files_removed, {
+      before_quarantine: '1 ignored path',
+      after_quarantine: '1 ignored path',
+    })
+    assert.equal(await access(ignoredPath).then(() => true).catch(() => false), false)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron wrapper removes ignored files from a disposable merged worktree', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-ignored-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'node_modules/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'ignore dependencies'])
+    mergeCandidateIntoMain(repo)
+    const ignoredPath = path.join(worktree, 'node_modules', 'fixture.txt')
+    await mkdir(path.dirname(ignoredPath), { recursive: true })
+    await writeFile(ignoredPath, 'rebuildable dependency\n')
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- deleted: .* — merged/)
+    assert.match(result.stdout, /ignored removed: 1 ignored path before quarantine, 1 ignored path after quarantine/)
+    assert.doesNotMatch(result.stdout, /ignored-files-present/)
+    assert.equal(await access(ignoredPath).then(() => true).catch(() => false), false)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
