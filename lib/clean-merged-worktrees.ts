@@ -1112,6 +1112,21 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
   return results
 }
 
+function cronCause(item) {
+  if (item.reason === 'default-branch-refresh-failed' && item.detail?.includes('worktree is dirty')) return 'default branchのworktreeに未commit変更があります'
+  if (item.reason === 'dirty') return '対象worktreeに未commit変更があります'
+  if (item.reason === 'locked') return `対象worktreeがロックされています${item.detail ? `: ${item.detail}` : ''}`
+  return item.detail ? item.detail.replaceAll(/\s+/g, ' ').trim() : '詳細情報はありません'
+}
+
+function cronNextStep(item) {
+  if (item.reason === 'default-branch-refresh-failed' && item.detail?.includes('worktree is dirty')) return '対象repoの変更を確認し、commitまたはstashしてから再実行してください'
+  if (item.reason === 'dirty') return '変更内容を確認し、必要ならcommitまたはstashしてから再実行してください'
+  if (item.reason === 'locked') return 'worktreeの利用状況を確認し、不要なlockを解除してから再実行してください'
+  if (item.action === 'error') return '原因を確認してから再実行してください'
+  return null
+}
+
 function renderCron(summary) {
   const importantReasons = new Set(['empty-repository', 'prunable', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || importantReasons.has(item.reason))
@@ -1125,6 +1140,11 @@ function renderCron(summary) {
       ? ` — ignored removed: ${item.ignored_files_removed.before_quarantine} before quarantine, ${item.ignored_files_removed.after_quarantine} after quarantine`
       : ''
     lines.push(`- ${item.action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
+    if (item.action === 'error') {
+      lines.push(`  原因: ${cronCause(item)}`)
+      const nextStep = cronNextStep(item)
+      if (nextStep) lines.push(`  対応: ${nextStep}`)
+    }
   }
   const pruneSummary = summary.mode === 'dry-run' ? `prune予定: ${summary.would_prune}` : `prune済み: ${summary.pruned}`
   lines.push('', `削除: ${summary.deleted} / ${pruneSummary} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item) => item.action === 'skip').length}`)
