@@ -507,25 +507,33 @@ function appendRestoreDiagnostic(detail, command, args, result) {
   return `${detail}; restore=${result.ok ? 'ok' : 'failed'}; ${commandDiagnostic(command, args, result)}`
 }
 
-function parseWorktrees(output) {
-  const records = []
-  let current = {}
+type WorktreeRecord = {
+  path: string
+  head?: string
+  branchRef?: string
+  locked?: string
+  prunable?: string
+}
+
+function parseWorktrees(output: string) {
+  const records: WorktreeRecord[] = []
+  let current: Partial<WorktreeRecord> = {}
   for (const token of output.split('\0')) {
     if (!token) {
-      if (current.path) records.push(current)
+      if (typeof current.path === 'string') records.push({ ...current, path: current.path })
       current = {}
       continue
     }
     const space = token.indexOf(' ')
     const key = space === -1 ? token : token.slice(0, space)
     const value = space === -1 ? true : token.slice(space + 1)
-    if (key === 'worktree') current.path = value
-    else if (key === 'HEAD') current.head = value
-    else if (key === 'branch') current.branchRef = value
-    else if (key === 'locked') current.locked = value === true ? '' : value
-    else if (key === 'prunable') current.prunable = value === true ? '' : value
+    if (key === 'worktree' && typeof value === 'string') current.path = value
+    else if (key === 'HEAD' && typeof value === 'string') current.head = value
+    else if (key === 'branch' && typeof value === 'string') current.branchRef = value
+    else if (key === 'locked') current.locked = typeof value === 'string' ? value : ''
+    else if (key === 'prunable') current.prunable = typeof value === 'string' ? value : ''
   }
-  if (current.path) records.push(current)
+  if (typeof current.path === 'string') records.push({ ...current, path: current.path })
   return records
 }
 
@@ -584,22 +592,44 @@ function escapeCronPath(value: string) {
     : escaped
 }
 
+function isValidDirtyStatusCode(code: string) {
+  if (code === '??') return true
+  if (code === '  ' || code === '!!') return false
+  if (new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']).has(code)) return true
+  const indexStatus = new Set([' ', 'M', 'T', 'A', 'D', 'R', 'C'])
+  const worktreeStatus = new Set([' ', 'M', 'T', 'D'])
+  return indexStatus.has(code[0]) && worktreeStatus.has(code[1])
+}
+
 function summarizeDirtyStatus(output: string) {
   const counts = new Map<string, number>()
   const locations = new Map<string, number>()
+  if (!output.endsWith('\0')) return { ok: false, error: 'git status returned an unterminated porcelain stream' }
   const tokens = output.split('\0')
+  let records = 0
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
-    if (!token || token.length < 3 || token[2] !== ' ') continue
+    if (!token) {
+      if (index !== tokens.length - 1) return { ok: false, error: 'git status returned an empty record' }
+      continue
+    }
+    if (token.length < 4 || token[2] !== ' ') return { ok: false, error: `git status returned an invalid porcelain record: ${escapeCronPath(token)}` }
     const code = token.slice(0, 2)
+    if (!isValidDirtyStatusCode(code)) return { ok: false, error: `git status returned an invalid status code: ${escapeCronPath(code)}` }
     const itemPath = token.slice(3)
+    if (!itemPath) return { ok: false, error: 'git status returned a record without a path' }
     const kind = statusKind(code)
     const location = itemPath.includes('/') ? `${itemPath.split('/', 1)[0]}/` : itemPath
     counts.set(kind, (counts.get(kind) || 0) + 1)
     locations.set(location, (locations.get(location) || 0) + 1)
-    if (code.includes('R') || code.includes('C')) index += 1
+    records += 1
+    if (code.includes('R') || code.includes('C')) {
+      const renamedPath = tokens[index + 1]
+      if (!renamedPath) return { ok: false, error: 'git status returned a rename/copy record without its second path' }
+      index += 1
+    }
   }
-  if (counts.size === 0) return '変更内容を読み取れませんでした'
+  if (records === 0) return { ok: false, error: 'git status returned no parseable records' }
   const countText = [...counts.entries()]
     .map(([kind, count]) => `${kind} ${count.toLocaleString('ja-JP')}件`)
     .join('、')
@@ -610,7 +640,36 @@ function summarizeDirtyStatus(output: string) {
     return `${escapeCronPath(location)} (${count.toLocaleString('ja-JP')}件)`
   })
   if (locationEntries.length > visibleLocations.length) visibleLocations.push(`他${locationEntries.length - visibleLocations.length}箇所`)
-  return `${countText}。主な場所: ${visibleLocations.join('、')}`
+  return { ok: true, summary: `${countText}。主な場所: ${visibleLocations.join('、')}` }
+}
+
+function isGitObjectId(value: unknown) {
+  return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
+}
+
+function readDefaultWorktreeSnapshot(repo: string, expectedPath: string, expectedWorktree: WorktreeRecord) {
+  const args = ['worktree', 'list', '--porcelain', '-z']
+  if (!expectedWorktree.branchRef || !isGitObjectId(expectedWorktree.head)) {
+    return { ok: false, error: `default branch worktree identity is malformed before status: ${expectedWorktree.branchRef || '<missing>'}@${expectedWorktree.head || '<missing>'}` }
+  }
+  const listing = git(repo, args)
+  if (!listing.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...args], listing) }
+  const currentWorktrees = parseWorktrees(listing.stdout)
+  const currentMatches = currentWorktrees.filter((item) => path.resolve(item.path) === expectedPath)
+  if (currentMatches.length !== 1) {
+    return { ok: false, error: currentMatches.length === 0 ? `default branch worktree disappeared: ${expectedPath}` : `default branch worktree identity is ambiguous: ${expectedPath}` }
+  }
+  const current = currentMatches[0]
+  if (!current.branchRef || !isGitObjectId(current.head)) {
+    return { ok: false, error: `default branch worktree identity is malformed after status: ${current.branchRef || '<missing>'}@${current.head || '<missing>'}` }
+  }
+  if (current.branchRef !== expectedWorktree.branchRef || current.head !== expectedWorktree.head) {
+    return {
+      ok: false,
+      error: `default branch worktree identity changed: expected ${expectedWorktree.branchRef || '<detached>'}@${expectedWorktree.head || '<missing>'}, actual ${current.branchRef || '<detached>'}@${current.head || '<missing>'}`,
+    }
+  }
+  return { ok: true, worktrees: currentWorktrees }
 }
 
 async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
@@ -618,17 +677,30 @@ async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
   const defaultWorktree = worktrees.find((item) => item.branchRef === defaultBranchRef)
   if (defaultWorktree) {
     const defaultPath = path.resolve(defaultWorktree.path)
-    const statusArgs = defaultBranchStatusArgs(defaultPath, worktrees)
+    const beforeStatus = readDefaultWorktreeSnapshot(repo, defaultPath, defaultWorktree)
+    if (!beforeStatus.ok) return { ok: false, code: 'default-branch-refresh-failed', error: beforeStatus.error }
+    const statusArgs = defaultBranchStatusArgs(defaultPath, beforeStatus.worktrees)
     const status = git(defaultPath, statusArgs)
     if (!status.ok) {
       return { ok: false, code: 'default-branch-refresh-failed', error: commandDiagnostic('git', ['-C', defaultPath, ...statusArgs], status) }
     }
+    let dirtyStatus
     if (status.stdout.length > 0) {
+      const summarized = summarizeDirtyStatus(status.stdout)
+      if (!summarized.ok) return { ok: false, code: 'default-branch-refresh-failed', error: summarized.error }
+      dirtyStatus = summarized.summary
+    }
+    const afterStatus = readDefaultWorktreeSnapshot(repo, defaultPath, defaultWorktree)
+    if (!afterStatus.ok) return { ok: false, code: 'default-branch-refresh-failed', error: afterStatus.error }
+    if (dirtyStatus !== undefined) {
       return {
-        ok: false,
-        code: 'default-branch-refresh-failed',
+        ok: true,
+        skipped: true,
+        code: 'default-branch-dirty',
         error: `default branch worktree is dirty: ${defaultPath}`,
-        dirty_status: summarizeDirtyStatus(status.stdout),
+        dirty_status: dirtyStatus,
+        default_worktree_path: defaultPath,
+        default_worktree: defaultWorktree,
       }
     }
   }
@@ -892,9 +964,11 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
   if (candidateWorktrees.length === 0) return results
   let defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
   if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found' }]
+  let dirtyRefresh = null
   if (apply) {
     const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
     if (!refreshed.ok) return [...results, { repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status }]
+    dirtyRefresh = refreshed
     defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
     if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' }]
   }
@@ -904,6 +978,11 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
   const remoteDefault = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
   if (!remoteDefault.ok) return [...results, { repo: realRepo, action: 'error', reason: remoteDefault.code, detail: remoteDefault.error }]
   if (remoteDefault.oid !== defaultHead) return [...results, { repo: realRepo, action: 'error', reason: 'local-default-stale', detail: `${defaultInfo.ref}=${defaultHead}, remote=${remoteDefault.oid}` }]
+  if (dirtyRefresh?.skipped) {
+    const finalSnapshot = readDefaultWorktreeSnapshot(realRepo, dirtyRefresh.default_worktree_path, dirtyRefresh.default_worktree)
+    if (!finalSnapshot.ok) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-refresh-failed', detail: finalSnapshot.error }]
+    return [...results, { repo: realRepo, action: 'skip', severity: 'warn', reason: dirtyRefresh.code, detail: dirtyRefresh.error, dirty_status: dirtyRefresh.dirty_status }]
+  }
   const allowedRoot = path.join(realRepo, '.worktree')
   let realAllowedRoot = null
   try {
@@ -1183,7 +1262,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
 }
 
 function isDefaultBranchWorktreeDirty(item: { reason?: string; dirty_status?: string }) {
-  return item.reason === 'default-branch-refresh-failed' && item.dirty_status !== undefined
+  return (item.reason === 'default-branch-dirty' || item.reason === 'default-branch-refresh-failed') && item.dirty_status !== undefined
 }
 
 function hasDirtyConflict(item: { dirty_status?: string }) {
@@ -1210,8 +1289,8 @@ function cronNextStep(item) {
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
-  const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || importantReasons.has(item.reason))
+  const importantReasons = new Set(['empty-repository', 'prunable', 'default-branch-dirty', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || item.severity === 'warn' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
   const lines = ['## merged worktree cleanup']
   for (const item of report) {
@@ -1221,8 +1300,9 @@ function renderCron(summary) {
     const ignored = item.ignored_files_removed
       ? ` — ignored removed: ${item.ignored_files_removed.before_quarantine} before quarantine, ${item.ignored_files_removed.after_quarantine} after quarantine`
       : ''
-    lines.push(`- ${item.action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
-    if (item.action === 'error') {
+    const action = item.severity === 'warn' ? 'warn' : item.action
+    lines.push(`- ${action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
+    if (item.action === 'error' || item.severity === 'warn') {
       lines.push(`  原因: ${cronCause(item)}`)
       if (isDefaultBranchWorktreeDirty(item)) lines.push(`  検出: ${item.dirty_status || '変更内容を読み取れませんでした'}`)
       const nextStep = cronNextStep(item)
@@ -1230,7 +1310,7 @@ function renderCron(summary) {
     }
   }
   const pruneSummary = summary.mode === 'dry-run' ? `prune予定: ${summary.would_prune}` : `prune済み: ${summary.pruned}`
-  lines.push('', `削除: ${summary.deleted} / ${pruneSummary} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item) => item.action === 'skip').length}`)
+  lines.push('', `削除: ${summary.deleted} / ${pruneSummary} / 警告: ${summary.warnings} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item) => item.action === 'skip').length}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -1259,7 +1339,7 @@ async function main() {
   if (json && cron) throw new Error('--json and --cron are mutually exclusive')
 
   const repos = await discoverRepos(root, explicitRepos)
-  const results = []
+  const results: Array<{ action: string; reason?: string; repo?: string; path?: string; severity?: string; [key: string]: unknown }> = []
   for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch))
   const summary = {
     mode: apply ? 'apply' : 'dry-run',
@@ -1271,6 +1351,7 @@ async function main() {
     would_delete: results.filter((item) => item.action === 'would-delete').length,
     would_prune: results.filter((item) => item.action === 'would-prune').length,
     skipped: results.filter((item) => item.action === 'skip').length,
+    warnings: results.filter((item) => 'severity' in item && item.severity === 'warn').length,
     errors: results.filter((item) => item.action === 'error').length,
     results
   }
