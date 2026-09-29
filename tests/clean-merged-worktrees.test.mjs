@@ -231,8 +231,189 @@ test('fails closed when the default branch worktree is dirty', async () => {
     assert.equal(summary.errors, 1)
     assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
     assert.match(summary.results[0].detail, /default branch worktree is dirty/)
+    assert.match(summary.results[0].dirty_status, /未追跡 1件/)
     assert.equal(git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
     assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output explains which default-branch paths caused the dirty error', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    await mkdir(path.join(repo, '.gocache', 'build'), { recursive: true })
+    await writeFile(path.join(repo, '.gocache', 'build', 'cache-entry'), 'cache\n')
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /原因: default branchのworktreeに未コミットの変更または未追跡ファイルがあります/)
+    assert.match(result.stdout, /検出: 未追跡 1件/)
+    assert.match(result.stdout, /\.gocache\//)
+    assert.match(result.stdout, /対応: .*変更内容を確認/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output counts tracked and deleted default-branch entries', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-tracked-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(repo, 'tracked.txt'), 'tracked\n')
+    git(repo, ['add', 'tracked.txt'])
+    git(repo, ['commit', '-qm', 'add tracked fixture'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    await writeFile(path.join(repo, 'README'), 'changed\n')
+    git(repo, ['rm', '-q', 'tracked.txt'])
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /検出: .*変更 1件.*削除 1件/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output classifies both-added conflicts as conflicts', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-conflict-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    const conflictPath = path.join(repo, 'both-added.txt')
+    git(repo, ['switch', '-q', '-c', 'conflict-side'])
+    await writeFile(conflictPath, 'side\n')
+    git(repo, ['add', 'both-added.txt'])
+    git(repo, ['commit', '-qm', 'add conflict file on side'])
+    git(repo, ['switch', '-q', 'main'])
+    await writeFile(conflictPath, 'main\n')
+    git(repo, ['add', 'both-added.txt'])
+    git(repo, ['commit', '-qm', 'add conflict file on main'])
+    const merge = run('git', ['-C', repo, 'merge', 'conflict-side'])
+    assert.notEqual(merge.status, 0, merge.stdout || merge.stderr || 'merge unexpectedly succeeded')
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /検出: 競合 1件/)
+    assert.doesNotMatch(result.stdout, /検出: 追加 1件/)
+    assert.match(result.stdout, /対応: 競合を解消するか/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output does not misclassify a failed status diagnostic as dirty state', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-status-error-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "status" ]; then
+    printf '%s\\n' 'fatal: status diagnostic mentions worktree is dirty but status failed' >&2
+    exit 97
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /status diagnostic mentions worktree is dirty but status failed/)
+    assert.doesNotMatch(result.stdout, /原因: default branchのworktreeに未コミットの変更または未追跡ファイルがあります/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output counts a rename once in the default-branch dirty summary', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-rename-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(repo, 'aa old'), 'fixture\n')
+    git(repo, ['add', 'aa old'])
+    git(repo, ['commit', '-qm', 'add rename fixture'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    git(repo, ['mv', 'aa old', 'renamed'])
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /検出: 名前変更 1件/)
+    assert.doesNotMatch(result.stdout, /検出: 名前変更 1件、変更 1件/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output counts a copy once in the default-branch dirty summary', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-copy-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(repo, 'aa old'), 'fixture\n')
+    git(repo, ['add', 'aa old'])
+    git(repo, ['commit', '-qm', 'add copy fixture'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    git(repo, ['config', 'status.renames', 'copies'])
+    await writeFile(path.join(repo, 'aa old'), 'changed\n')
+    git(repo, ['add', 'aa old'])
+    await writeFile(path.join(repo, 'copy'), 'fixture\n')
+    git(repo, ['add', 'copy'])
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /検出: (?:コピー 1件、変更 1件|変更 1件、コピー 1件)/)
+    assert.match(result.stdout, /(?:主な場所: |、)aa old \(1件\)/)
+    assert.doesNotMatch(result.stdout, /(?:主な場所: |、)old \(1件\)/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cron output escapes and bounds dirty path locations', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-path-detail-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    const dirtyName = `odd\nname${'x'.repeat(200)}`
+    await writeFile(path.join(repo, dirtyName), 'untracked\n')
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /検出: 未追跡 1件/)
+    assert.match(result.stdout, /odd\\nname/)
+    assert.match(result.stdout, /…/)
+    assert.doesNotMatch(result.stdout, new RegExp(dirtyName.replace('\n', '\\n')))
+    assert.equal(result.stdout.split('\n').filter((line) => line.startsWith('  検出:')).length, 1)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
