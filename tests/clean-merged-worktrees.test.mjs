@@ -191,7 +191,7 @@ test('fetches a default branch when it is not checked out in a worktree', async 
   }
 })
 
-test('fails closed for unregistered content below the worktree directory', async () => {
+test('warns and skips when unregistered content dirties the default branch', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-unregistered-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
@@ -203,10 +203,14 @@ test('fails closed for unregistered content below the worktree directory', async
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     const summary = JSON.parse(result.stdout)
-    assert.equal(summary.errors, 1)
-    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.warnings, 1)
+    assert.equal(summary.results[0].action, 'skip')
+    assert.equal(summary.results[0].severity, 'warn')
+    assert.equal(summary.results[0].reason, 'default-branch-dirty')
     assert.match(summary.results[0].detail, /default branch worktree is dirty/)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
     assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
@@ -215,7 +219,7 @@ test('fails closed for unregistered content below the worktree directory', async
   }
 })
 
-test('fails closed when the default branch worktree is dirty', async () => {
+test('warns and skips when the default branch worktree is dirty', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-refresh-dirty-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
@@ -226,10 +230,14 @@ test('fails closed when the default branch worktree is dirty', async () => {
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     const summary = JSON.parse(result.stdout)
-    assert.equal(summary.errors, 1)
-    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.warnings, 1)
+    assert.equal(summary.results[0].action, 'skip')
+    assert.equal(summary.results[0].severity, 'warn')
+    assert.equal(summary.results[0].reason, 'default-branch-dirty')
     assert.match(summary.results[0].detail, /default branch worktree is dirty/)
     assert.match(summary.results[0].dirty_status, /未追跡 1件/)
     assert.equal(git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
@@ -239,7 +247,7 @@ test('fails closed when the default branch worktree is dirty', async () => {
   }
 })
 
-test('cron output explains which default-branch paths caused the dirty error', async () => {
+test('cron output explains which default-branch paths caused the dirty warning', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-detail-'))
   try {
     const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
@@ -250,8 +258,8 @@ test('cron output explains which default-branch paths caused the dirty error', a
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
-    assert.match(result.stdout, /原因: default branchのworktreeに未コミットの変更または未追跡ファイルがあります/)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- warn: .* — default-branch-dirty/)
     assert.match(result.stdout, /検出: 未追跡 1件/)
     assert.match(result.stdout, /\.gocache\//)
     assert.match(result.stdout, /対応: .*変更内容を確認/)
@@ -276,7 +284,7 @@ test('cron output counts tracked and deleted default-branch entries', async () =
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     assert.match(result.stdout, /検出: .*変更 1件.*削除 1件/)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
@@ -303,7 +311,7 @@ test('cron output classifies both-added conflicts as conflicts', async () => {
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     assert.match(result.stdout, /検出: 競合 1件/)
     assert.doesNotMatch(result.stdout, /検出: 追加 1件/)
     assert.match(result.stdout, /対応: 競合を解消するか/)
@@ -346,6 +354,226 @@ exec '${realGit}' \"$@\"
   }
 })
 
+test('keeps a dirty default-branch preflight error when remote metadata fails', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-remote-error-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    await writeFile(path.join(repo, 'remote-metadata-dirty.txt'), 'do not overwrite\n')
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+ls_remote_count='${fixtureRoot}/ls-remote-count'
+if [ -f "$ls_remote_count" ]; then
+  read ls_remote_calls <"$ls_remote_count"
+else
+  ls_remote_calls=0
+fi
+for argument in "$@"; do
+  if [ "$argument" = "ls-remote" ]; then
+    ls_remote_calls=$((ls_remote_calls + 1))
+    printf '%s\\n' "$ls_remote_calls" >"$ls_remote_count"
+    if [ "$ls_remote_calls" -ge 3 ]; then
+      printf '%s\\n' 'simulated remote metadata failure' >&2
+      exit 91
+    fi
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.warnings, 0)
+    assert.equal(summary.results[0].reason, 'remote-default-query-failed')
+    assert.doesNotMatch(result.stdout, /default-branch-dirty/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps malformed successful status output on the error path', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-malformed-status-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "status" ]; then
+    printf '%s\\n' 'not porcelain status output'
+    exit 0
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.warnings, 0)
+    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.match(summary.results[0].detail, /unterminated|invalid porcelain record/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('rejects semantically invalid, unterminated, and clean porcelain records', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-status-records-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "status" ]; then
+    case "$STATUS_MODE" in
+      invalid-code) printf '%s\\0' '?! bad' ;;
+      missing-nul) printf '%s' '?? bad' ;;
+      clean-record) printf '%s\\0' '   clean' ;;
+    esac
+    exit 0
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const cases = [
+      ['invalid-code', /invalid status code/],
+      ['missing-nul', /unterminated porcelain stream/],
+      ['clean-record', /invalid status code/],
+    ]
+    for (const [mode, detailPattern] of cases) {
+      const result = run(entrypoint, ['--apply', '--json'], {
+        env: {
+          GIT_REPOSITORIES_ROOT: fixtureRoot,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          STATUS_MODE: mode,
+        },
+      })
+      assert.equal(result.status, 1, result.stderr || result.stdout || result.error || `process did not start for ${mode}`)
+      const summary = JSON.parse(result.stdout)
+      assert.equal(summary.errors, 1)
+      assert.equal(summary.warnings, 0)
+      assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+      assert.match(summary.results[0].detail, detailPattern)
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a malformed default-worktree HEAD identity on the error path', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-missing-head-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    const listCount = path.join(fixtureRoot, 'worktree-list-count')
+    await writeFile(fakeGit, `#!/bin/sh
+count_file='${listCount}'
+for argument in "$@"; do
+  if [ "$argument" = "list" ]; then
+    count=0
+    [ -f "$count_file" ] && count=$(cat "$count_file")
+    count=$((count + 1))
+    printf '%s\\n' "$count" >"$count_file"
+    if [ "$count" -ge 3 ]; then
+      printf 'worktree ${repo}\\0branch refs/heads/main\\0\\0'
+      exit 0
+    fi
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.warnings, 0)
+    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.match(summary.results[0].detail, /identity is malformed/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a default-worktree branch switch race on the error path', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-race-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "status" ]; then
+    '${realGit}' -C '${repo}' switch -q -c other
+    printf '%s\\n' 'race' >'${repo}/race.txt'
+  fi
+done
+exec '${realGit}' \"$@\"
+`)
+    await chmod(fakeGit, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.warnings, 0)
+    assert.equal(summary.results[0].reason, 'default-branch-refresh-failed')
+    assert.match(summary.results[0].detail, /identity changed/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
 test('cron output counts a rename once in the default-branch dirty summary', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-rename-detail-'))
   try {
@@ -361,7 +589,7 @@ test('cron output counts a rename once in the default-branch dirty summary', asy
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     assert.match(result.stdout, /検出: 名前変更 1件/)
     assert.doesNotMatch(result.stdout, /検出: 名前変更 1件、変更 1件/)
   } finally {
@@ -388,7 +616,7 @@ test('cron output counts a copy once in the default-branch dirty summary', async
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     assert.match(result.stdout, /検出: (?:コピー 1件、変更 1件|変更 1件、コピー 1件)/)
     assert.match(result.stdout, /(?:主な場所: |、)aa old \(1件\)/)
     assert.doesNotMatch(result.stdout, /(?:主な場所: |、)old \(1件\)/)
@@ -408,7 +636,7 @@ test('cron output escapes and bounds dirty path locations', async () => {
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
 
-    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     assert.match(result.stdout, /検出: 未追跡 1件/)
     assert.match(result.stdout, /odd\\nname/)
     assert.match(result.stdout, /…/)
