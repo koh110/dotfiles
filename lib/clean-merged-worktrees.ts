@@ -548,6 +548,71 @@ function defaultBranchStatusArgs(defaultPath, worktrees) {
   return ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.', ...exclusions]
 }
 
+const MAX_CRON_PATH_LENGTH = 120
+const MAX_CRON_LOCATIONS = 4
+
+function statusKind(code: string) {
+  if (code === '??') return '未追跡'
+  if (code.includes('U') || code === 'AA' || code === 'DD') return '競合'
+  if (code.includes('D')) return '削除'
+  if (code.includes('R')) return '名前変更'
+  if (code.includes('C')) return 'コピー'
+  if (code.includes('A')) return '追加'
+  if (code.includes('M')) return '変更'
+  return '変更'
+}
+
+function escapeCronPath(value: string) {
+  let escaped = ''
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) || 0
+    if (character === '\\') escaped += '\\\\'
+    else if (character === '\t') escaped += '\\t'
+    else if (character === '\n') escaped += '\\n'
+    else if (character === '\r') escaped += '\\r'
+    else if (codePoint === 0x2028) escaped += '\\u2028'
+    else if (codePoint === 0x2029) escaped += '\\u2029'
+    else if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+      escaped += `\\x${codePoint.toString(16).padStart(2, '0')}`
+    } else {
+      escaped += character
+    }
+  }
+  const characters = Array.from(escaped)
+  return characters.length > MAX_CRON_PATH_LENGTH
+    ? `${characters.slice(0, MAX_CRON_PATH_LENGTH - 1).join('')}…`
+    : escaped
+}
+
+function summarizeDirtyStatus(output: string) {
+  const counts = new Map<string, number>()
+  const locations = new Map<string, number>()
+  const tokens = output.split('\0')
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (!token || token.length < 3 || token[2] !== ' ') continue
+    const code = token.slice(0, 2)
+    const itemPath = token.slice(3)
+    const kind = statusKind(code)
+    const location = itemPath.includes('/') ? `${itemPath.split('/', 1)[0]}/` : itemPath
+    counts.set(kind, (counts.get(kind) || 0) + 1)
+    locations.set(location, (locations.get(location) || 0) + 1)
+    if (code.includes('R') || code.includes('C')) index += 1
+  }
+  if (counts.size === 0) return '変更内容を読み取れませんでした'
+  const countText = [...counts.entries()]
+    .map(([kind, count]) => `${kind} ${count.toLocaleString('ja-JP')}件`)
+    .join('、')
+  const locationEntries = [...locations.entries()].sort((left, right) => {
+    return right[1] - left[1] || left[0].localeCompare(right[0])
+  })
+  const visibleLocations = locationEntries.slice(0, MAX_CRON_LOCATIONS).map(([location, count]) => {
+    return `${escapeCronPath(location)} (${count.toLocaleString('ja-JP')}件)`
+  })
+  if (locationEntries.length > visibleLocations.length) visibleLocations.push(`他${locationEntries.length - visibleLocations.length}箇所`)
+  return `${countText}。主な場所: ${visibleLocations.join('、')}`
+}
+
 async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
   const defaultBranchRef = `refs/heads/${defaultInfo.name}`
   const defaultWorktree = worktrees.find((item) => item.branchRef === defaultBranchRef)
@@ -559,7 +624,12 @@ async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
       return { ok: false, code: 'default-branch-refresh-failed', error: commandDiagnostic('git', ['-C', defaultPath, ...statusArgs], status) }
     }
     if (status.stdout.length > 0) {
-      return { ok: false, code: 'default-branch-refresh-failed', error: `default branch worktree is dirty: ${defaultPath}` }
+      return {
+        ok: false,
+        code: 'default-branch-refresh-failed',
+        error: `default branch worktree is dirty: ${defaultPath}`,
+        dirty_status: summarizeDirtyStatus(status.stdout),
+      }
     }
   }
 
@@ -824,7 +894,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
   if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found' }]
   if (apply) {
     const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
-    if (!refreshed.ok) return [...results, { repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error }]
+    if (!refreshed.ok) return [...results, { repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status }]
     defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
     if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' }]
   }
@@ -1112,15 +1182,27 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
   return results
 }
 
+function isDefaultBranchWorktreeDirty(item: { reason?: string; dirty_status?: string }) {
+  return item.reason === 'default-branch-refresh-failed' && item.dirty_status !== undefined
+}
+
+function hasDirtyConflict(item: { dirty_status?: string }) {
+  const countText = item.dirty_status?.split('。', 1)[0] || ''
+  return countText.split('、').some((entry) => entry.startsWith('競合 '))
+}
+
 function cronCause(item) {
-  if (item.reason === 'default-branch-refresh-failed' && item.detail?.includes('worktree is dirty')) return 'default branchのworktreeに未commit変更があります'
+  if (isDefaultBranchWorktreeDirty(item)) return 'default branchのworktreeに未コミットの変更または未追跡ファイルがあります'
   if (item.reason === 'dirty') return '対象worktreeに未commit変更があります'
   if (item.reason === 'locked') return `対象worktreeがロックされています${item.detail ? `: ${item.detail}` : ''}`
   return item.detail ? item.detail.replaceAll(/\s+/g, ' ').trim() : '詳細情報はありません'
 }
 
 function cronNextStep(item) {
-  if (item.reason === 'default-branch-refresh-failed' && item.detail?.includes('worktree is dirty')) return '対象repoの変更を確認し、commitまたはstashしてから再実行してください'
+  if (isDefaultBranchWorktreeDirty(item)) {
+    if (hasDirtyConflict(item)) return '競合を解消するか、進行中のmergeまたはrebaseをabortしてから、必要な変更をcommitまたは退避し、worktreeをcleanにして再実行してください'
+    return '検出された変更内容を確認し、不要なキャッシュや生成物はリポジトリ外へ移動または削除し、必要な変更はcommitまたは退避して、worktreeをcleanにしてから再実行してください'
+  }
   if (item.reason === 'dirty') return '変更内容を確認し、必要ならcommitまたはstashしてから再実行してください'
   if (item.reason === 'locked') return 'worktreeの利用状況を確認し、不要なlockを解除してから再実行してください'
   if (item.action === 'error') return '原因を確認してから再実行してください'
@@ -1135,13 +1217,14 @@ function renderCron(summary) {
   for (const item of report) {
     const target = item.path || item.repo
     const evidence = item.evidence?.pr ? ` (${item.evidence.pr})` : ''
-    const detail = item.detail ? ` — ${item.detail.replaceAll(/\s+/g, ' ').trim()}` : ''
+    const detail = item.detail && !isDefaultBranchWorktreeDirty(item) ? ` — ${item.detail.replaceAll(/\s+/g, ' ').trim()}` : ''
     const ignored = item.ignored_files_removed
       ? ` — ignored removed: ${item.ignored_files_removed.before_quarantine} before quarantine, ${item.ignored_files_removed.after_quarantine} after quarantine`
       : ''
     lines.push(`- ${item.action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
     if (item.action === 'error') {
       lines.push(`  原因: ${cronCause(item)}`)
+      if (isDefaultBranchWorktreeDirty(item)) lines.push(`  検出: ${item.dirty_status || '変更内容を読み取れませんでした'}`)
       const nextStep = cronNextStep(item)
       if (nextStep) lines.push(`  対応: ${nextStep}`)
     }
