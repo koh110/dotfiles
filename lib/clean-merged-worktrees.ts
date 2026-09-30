@@ -973,27 +973,34 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     return [...results, { repo: realRepo, action: 'skip', reason: 'empty-repository' }]
   }
   if (candidateWorktrees.length === 0 && !hasUnattachedLocalBranches(realRepo, worktrees)) return results
+  // With no worktree candidates only unattached branches remain. A repository whose default
+  // branch cannot be established (no origin, stale or dirty default, ...) keeps its branches
+  // without reporting an error, matching how unmerged unattached branches are skipped.
+  const branchCleanupOnly = candidateWorktrees.length === 0
+  const prerequisiteFailure = (item) => branchCleanupOnly
+    ? [...results, { repo: realRepo, action: 'skip', reason: 'branch-cleanup-unavailable', detail: `${item.reason}${item.detail ? `: ${item.detail}` : ''}` }]
+    : [...results, item]
   let defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
-  if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found' }]
+  if (!defaultInfo) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-not-found' })
   let dirtyRefresh = null
   if (apply) {
     const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
-    if (!refreshed.ok) return [...results, { repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status }]
+    if (!refreshed.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status })
     dirtyRefresh = refreshed
     defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
-    if (!defaultInfo) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' }]
+    if (!defaultInfo) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' })
   }
   const defaultHeadResult = git(realRepo, ['rev-parse', '--verify', defaultInfo.ref])
-  if (!defaultHeadResult.ok) return [...results, { repo: realRepo, action: 'error', reason: 'default-ref-unreadable' }]
+  if (!defaultHeadResult.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-ref-unreadable' })
   const defaultHead = defaultHeadResult.stdout.trim()
   const mergedPrEvidence = createMergedPrLookup(realRepo, defaultInfo.name, defaultInfo.ref)
   const remoteDefault = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
-  if (!remoteDefault.ok) return [...results, { repo: realRepo, action: 'error', reason: remoteDefault.code, detail: remoteDefault.error }]
-  if (remoteDefault.oid !== defaultHead) return [...results, { repo: realRepo, action: 'error', reason: 'local-default-stale', detail: `${defaultInfo.ref}=${defaultHead}, remote=${remoteDefault.oid}` }]
+  if (!remoteDefault.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: remoteDefault.code, detail: remoteDefault.error })
+  if (remoteDefault.oid !== defaultHead) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'local-default-stale', detail: `${defaultInfo.ref}=${defaultHead}, remote=${remoteDefault.oid}` })
   if (dirtyRefresh?.skipped) {
     const finalSnapshot = readDefaultWorktreeSnapshot(realRepo, dirtyRefresh.default_worktree_path, dirtyRefresh.default_worktree)
-    if (!finalSnapshot.ok) return [...results, { repo: realRepo, action: 'error', reason: 'default-branch-refresh-failed', detail: finalSnapshot.error }]
-    return [...results, { repo: realRepo, action: 'skip', severity: 'warn', reason: dirtyRefresh.code, detail: dirtyRefresh.error, dirty_status: dirtyRefresh.dirty_status }]
+    if (!finalSnapshot.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-refresh-failed', detail: finalSnapshot.error })
+    return prerequisiteFailure({ repo: realRepo, action: 'skip', severity: 'warn', reason: dirtyRefresh.code, detail: dirtyRefresh.error, dirty_status: dirtyRefresh.dirty_status })
   }
   const allowedRoot = path.join(realRepo, '.worktree')
   let realAllowedRoot = null

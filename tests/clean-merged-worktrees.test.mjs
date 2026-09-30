@@ -183,7 +183,7 @@ test('fetches a default branch when it is not checked out in a worktree', async 
     const summary = JSON.parse(result.stdout)
     assert.equal(summary.deleted, 1)
     assert.equal(summary.errors, 0)
-    assert.equal(summary.results[0].branch_delete_method, 'git-branch-d-in-authoritative-detached-worktree')
+    assert.equal(summary.results[0].branch_delete_method, 'git-update-ref-transaction-cas-with-ancestry-evidence')
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/remotes/origin/main']).status, 0)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
   } finally {
@@ -681,11 +681,7 @@ test('removes the local branch after a GitHub-confirmed squash merge', async () 
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -759,11 +755,7 @@ exec "$real_git" -C "$invoked_repo" "$@"
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -841,11 +833,7 @@ exec "$real_git" -C "$repo" "$@"
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\\n' '{"commits":[{"oid":"${head}"}],"mergeCommit":{"oid":"${mergeCommit}"}}'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -1066,11 +1054,7 @@ test('rejects a GitHub mergeCommit ref instead of treating it as an object ID', 
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z"}]'
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\\n' '{"mergeCommit":{"oid":"refs/heads/main"},"commits":[{"oid":"${head}"}]}'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"refs/heads/main"}}]'
   exit 0
 fi
 exit 1
@@ -1087,6 +1071,7 @@ exit 1
     const summary = JSON.parse(result.stdout)
     assert.equal(summary.errors, 1)
     assert.equal(summary.results[0].reason, 'github-invalid-response')
+    assert.match(summary.results[0].detail, /mergeCommit is invalid/)
     assert.equal(git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
     assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
   } finally {
@@ -1308,4 +1293,141 @@ test('cron wrapper has a side-effect-free help path and rejects arguments', () =
 
   const invalid = run(cronEntrypoint, ['--unexpected'])
   assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout || invalid.error || 'process did not start')
+})
+
+async function writeLoggingGh(fakeBin, logPath, pulls) {
+  const fakeGh = path.join(fakeBin, 'gh')
+  await writeFile(fakeGh, `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' ${JSON.stringify(JSON.stringify(pulls))}
+  exit 0
+fi
+exit 1
+`)
+  await chmod(fakeGh, 0o755)
+  const fakeDocker = path.join(fakeBin, 'docker')
+  await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+  await chmod(fakeDocker, 0o755)
+}
+
+async function ghCalls(logPath) {
+  return (await readFile(logPath, 'utf8').catch(() => '')).split('\n').filter(Boolean)
+}
+
+test('deletes merged local branches that have no worktree and skips unmerged ones', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unattached-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    // The upstream lags behind the merged local branch, which `git branch -d` would refuse.
+    git(worktree, ['push', '-q', '-u', 'origin', 'feature'])
+    await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+    git(worktree, ['add', 'feature-2.txt'])
+    git(worktree, ['commit', '-qm', 'feature 2'])
+    git(repo, ['worktree', 'remove', worktree])
+    mergeCandidateIntoMain(repo)
+    git(repo, ['branch', 'wip', 'main'])
+    git(repo, ['switch', '-q', 'wip'])
+    await writeFile(path.join(repo, 'wip.txt'), 'wip\n')
+    git(repo, ['add', 'wip.txt'])
+    git(repo, ['commit', '-qm', 'wip'])
+    git(repo, ['switch', '-q', 'main'])
+    git(repo, ['branch', 'checked-out', 'main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, [])
+    const other = path.join(fixtureRoot, 'other')
+    git(repo, ['worktree', 'add', '-q', other, 'checked-out'])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 0)
+    const byBranch = Object.fromEntries(summary.results.filter((item) => item.target === 'branch').map((item) => [item.branch, item]))
+    assert.equal(byBranch.feature.action, 'deleted')
+    assert.equal(byBranch.feature.evidence.method, 'ancestry')
+    assert.equal(byBranch.feature.branch_delete_method, 'git-update-ref-transaction-cas-with-ancestry-evidence')
+    assert.equal(byBranch.wip.action, 'skip')
+    assert.equal(byBranch.wip.reason, 'not-merged')
+    assert.equal(byBranch['checked-out'], undefined)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/wip'])
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/checked-out'])
+    assert.equal((await ghCalls(ghLog)).length, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps unattached branches without reporting errors when merge evidence is unavailable', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unattached-no-origin-'))
+  try {
+    const repo = await makeCommittedRepo(fixtureRoot)
+    git(repo, ['branch', 'topic'])
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.equal(result.stdout, '[SILENT]\n')
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/topic'])
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('resolves merged-PR evidence for every candidate with one gh call per repository', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-gh-batch-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const featureHead = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['branch', 'other', 'main'])
+    const otherWorktree = path.join(fixtureRoot, 'other-work')
+    git(repo, ['worktree', 'add', '-q', otherWorktree, 'other'])
+    await writeFile(path.join(otherWorktree, 'other.txt'), 'other\n')
+    git(otherWorktree, ['add', 'other.txt'])
+    git(otherWorktree, ['commit', '-qm', 'other'])
+    const otherHead = git(otherWorktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['worktree', 'remove', otherWorktree])
+    squashMergeCandidateIntoMain(repo)
+    const featureMerge = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    git(repo, ['merge', '--squash', 'other'])
+    git(repo, ['commit', '-qm', 'squash merge other'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    const otherMerge = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = (number, headRefName, headRefOid, mergeCommit) => ({ number, url: `https://github.com/owner/repo/pull/${number}`, mergedAt: '2026-01-01T00:00:00Z', headRefName, headRefOid, mergeCommit: { oid: mergeCommit } })
+    await writeLoggingGh(fakeBin, ghLog, [pull(1, 'feature', featureHead, featureMerge), pull(2, 'other', otherHead, otherMerge)])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.deleted, 2)
+    assert.deepEqual(summary.results.map((item) => [item.branch, item.action, item.evidence?.number]), [['feature', 'deleted', 1], ['other', 'deleted', 2]])
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/other']).status, 1)
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.length, 1)
+    assert.doesNotMatch(calls[0], /--head/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
 })
