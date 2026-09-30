@@ -6,8 +6,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
-const entrypoint = path.join(root, 'bin', 'clean-merged-worktrees.sh')
-const cronEntrypoint = path.join(root, 'bin', 'clean-merged-worktrees-cron.sh')
+const entrypoint = path.join(root, 'bin', 'clean-merged-branches.sh')
+const cronEntrypoint = path.join(root, 'bin', 'clean-merged-branches-cron.sh')
 
 function run(command, args, options = {}) {
   const { env, clearEnv = [], ...spawnOptions } = options
@@ -117,7 +117,7 @@ test('removes a clean merged worktree and its local branch in apply mode', async
     const listing = git(repo, ['worktree', 'list', '--porcelain']).stdout
     assert.doesNotMatch(listing, new RegExp(worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
-    const lockExists = await access(path.join(repo, '.git', 'clean-merged-worktrees.lock')).then(() => true).catch(() => false)
+    const lockExists = await access(path.join(repo, '.git', 'clean-merged-branches.lock')).then(() => true).catch(() => false)
     assert.equal(lockExists, false)
     const headPath = path.resolve(repo, git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'HEAD']).stdout.trim())
     await assert.rejects(access(`${headPath}.lock`))
@@ -939,7 +939,7 @@ test('fails closed when another cleanup process holds the repository lock', asyn
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-lock-'))
   try {
     const repo = await makeCommittedRepo(fixtureRoot)
-    const lockPath = path.join(repo, '.git', 'clean-merged-worktrees.lock')
+    const lockPath = path.join(repo, '.git', 'clean-merged-branches.lock')
     await writeFile(lockPath, 'held by fixture\n')
     const result = run(entrypoint, ['--apply', '--json'], {
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
@@ -1289,7 +1289,7 @@ test('cron wrapper applies the same prune-first contract without arguments', asy
 test('cron wrapper has a side-effect-free help path and rejects arguments', () => {
   const help = run(cronEntrypoint, ['--help'])
   assert.equal(help.status, 0, help.stderr || help.stdout || help.error || 'process did not start')
-  assert.match(help.stdout, /Usage: clean-merged-worktrees-cron\.sh/)
+  assert.match(help.stdout, /Usage: clean-merged-branches-cron\.sh/)
 
   const invalid = run(cronEntrypoint, ['--unexpected'])
   assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout || invalid.error || 'process did not start')

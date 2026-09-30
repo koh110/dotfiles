@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  printf '%s\n' 'Usage: clean-merged-worktrees-cron.sh'
+  printf '%s\n' 'Usage: clean-merged-branches-cron.sh'
   printf '%s\n' 'Runs the merged-worktree cleanup in apply mode with cron-formatted output.'
 }
 
@@ -11,7 +11,7 @@ if [ "$#" -gt 0 ]; then
     usage
     exit 0
   fi
-  printf '%s\n' 'clean-merged-worktrees-cron.sh: no arguments are accepted' >&2
+  printf '%s\n' 'clean-merged-branches-cron.sh: no arguments are accepted' >&2
   usage >&2
   exit 2
 fi

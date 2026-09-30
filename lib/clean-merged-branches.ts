@@ -6,12 +6,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { parseArgs } from 'node:util'
-import { loadCleanMergedWorktreesConfig } from './clean-merged-branches-config.ts'
+import { loadCleanMergedBranchesConfig } from './clean-merged-branches-config.ts'
 
-const config = loadCleanMergedWorktreesConfig()
+const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-worktrees [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, or exactly matches a merged GitHub PR commit. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, or exactly matches a merged GitHub PR commit. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
 }
 
 function run(command, args, options = {}) {
@@ -323,7 +323,7 @@ async function acquireCleanupLock(repo) {
   if (!commonDirPath || !path.isAbsolute(commonDirPath)) {
     return { ok: false, code: 'cleanup-lock-path-failed', error: `git common directory is not absolute: ${commonDirPath || '<empty>'}` }
   }
-  const lockPath = path.join(commonDirPath, 'clean-merged-worktrees.lock')
+  const lockPath = path.join(commonDirPath, 'clean-merged-branches.lock')
   const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0)
   let handle
   try {
@@ -1481,6 +1481,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`clean-merged-worktrees: ${error instanceof Error ? error.message : String(error)}\n`)
+  process.stderr.write(`clean-merged-branches: ${error instanceof Error ? error.message : String(error)}\n`)
   process.exitCode = 2
 })
