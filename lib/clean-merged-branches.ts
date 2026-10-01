@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { parseArgs } from 'node:util'
-import { loadCleanMergedWorktreesConfig } from './clean-merged-worktrees-config.ts'
+import { loadCleanMergedWorktreesConfig } from './clean-merged-branches-config.ts'
 
 const config = loadCleanMergedWorktreesConfig()
 
