@@ -11,7 +11,7 @@ import { loadCleanMergedBranchesConfig } from './clean-merged-branches-config.ts
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, or exactly matches a merged GitHub PR commit. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
 }
 
 function run(command, args, options = {}) {
@@ -37,12 +37,7 @@ function git(repo, args, options = {}) {
   return run('git', ['-C', repo, ...args], options)
 }
 
-async function deleteBranchRefWithCas(repo, ref, expectedOid, verifyUnderLock: () => string | null = () => null) {
-  const commonDir = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  if (!commonDir.ok || !path.isAbsolute(commonDir.stdout.trim())) {
-    return { ok: false, committed: false, error: !commonDir.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], commonDir) : `git common directory is not absolute: ${commonDir.stdout.trim() || '<empty>'}` }
-  }
-  const lockPath = path.join(commonDir.stdout.trim(), `${ref}.lock`)
+async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null) {
   const command = ['-C', repo, 'update-ref', '--stdin']
   let stdout = ''
   let stderr = ''
@@ -85,20 +80,16 @@ async function deleteBranchRefWithCas(repo, ref, expectedOid, verifyUnderLock: (
       await finished
     }
   }
-  child.stdin.write(`start\ndelete ${ref} ${expectedOid}\nprepare\n`)
-  const lockDeadline = Date.now() + 30_000
-  while (!closed && Date.now() < lockDeadline) {
-    try {
-      await fs.lstat(lockPath)
-      break
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 10))
-    }
+  child.stdin.write(`start\nverify ${defaultRef} ${expectedDefaultHead}\ndelete ${ref} ${expectedOid}\nprepare\n`)
+  const prepareDeadline = Date.now() + 30_000
+  const hasAck = (name: string) => stdout.split(/\r?\n/).includes(`${name}: ok`)
+  while (!closed && Date.now() < prepareDeadline && !hasAck('prepare')) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
   }
-  if (closed || !(await fs.lstat(lockPath).then(() => true).catch(() => false))) {
+  if (closed || !hasAck('start') || !hasAck('prepare')) {
     await abort()
     const failed = result()
-    return { ok: false, committed: false, error: `${commandDiagnostic('git', command, failed)}; ref transaction lock was not acquired: ${lockPath}` }
+    return { ok: false, committed: false, error: `${commandDiagnostic('git', command, failed)}; update-ref prepare acknowledgement was not received` }
   }
   const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
   await new Promise((resolve) => setTimeout(resolve, 0))
@@ -111,7 +102,11 @@ async function deleteBranchRefWithCas(repo, ref, expectedOid, verifyUnderLock: (
     const failed = result()
     return { ok: false, committed: false, error: `${commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], fencedListing)}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
   }
-  if (parseWorktrees(fencedListing.stdout).some((worktree) => worktree.branchRef === ref)) {
+  const allowedPath = allowedWorktreePath ? path.resolve(allowedWorktreePath) : null
+  const branchInUse = parseWorktrees(fencedListing.stdout).some((worktree) => {
+    return worktree.branchRef === ref && (!allowedPath || path.resolve(worktree.path) !== allowedPath)
+  })
+  if (branchInUse) {
     await abort()
     const failed = result()
     return { ok: false, committed: false, error: `${ref} became used by another worktree while its ref lock was held${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
@@ -122,11 +117,29 @@ async function deleteBranchRefWithCas(repo, ref, expectedOid, verifyUnderLock: (
     const failed = result()
     return { ok: false, committed: false, error: `${evidenceError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
   }
+  let preCommit
+  try {
+    preCommit = await beforeCommit()
+  } catch (error) {
+    preCommit = { ok: false, reason: 'branch-delete-failed', error: errorText(error) }
+  }
+  if (!preCommit.ok) {
+    await abort()
+    const failed = result()
+    return {
+      ok: false,
+      committed: false,
+      reason: preCommit.reason || 'branch-delete-failed',
+      error: `${preCommit.error || 'pre-commit cleanup failed'}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
+    }
+  }
   child.stdin.write('commit\n')
   child.stdin.end()
   await finished
   const committed = result()
-  return { ...committed, committed: committed.ok }
+  return committed.ok && hasAck('commit')
+    ? { ...committed, committed: true }
+    : { ...committed, committed: false, error: `${commandDiagnostic('git', command, committed)}; update-ref commit acknowledgement was not received` }
 }
 
 function verifyRefAbsent(repo, ref) {
@@ -145,16 +158,29 @@ function restoreBranchRef(repo, ref, expectedOid) {
   return { ok: true }
 }
 
-async function acquireWorktreeHeadLocks(worktreeRecords) {
-  const acquired = []
-  async function release() {
-    const errors = []
+async function acquireWorktreeLocks(worktreeRecords: any[], lockNames: string[] = ['HEAD']) {
+  const acquired: any[] = []
+  let released = false
+  async function release(consumedPaths = new Set()) {
+    if (released) return { ok: true }
+    released = true
+    const errors: string[] = []
     for (const lock of acquired.reverse()) {
       let current
       try {
         current = await fs.lstat(lock.path)
       } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+        if (consumedPaths.has(lock.path) && code === 'ENOENT') {
+          try { await lock.handle.close() } catch (closeError) { errors.push(`${lock.path}: ${errorText(closeError)}`) }
+          continue
+        }
         errors.push(`${lock.path}: cannot verify lock before release: ${errorText(error)}`)
+        try { await lock.handle.close() } catch (closeError) { errors.push(`${lock.path}: ${errorText(closeError)}`) }
+        continue
+      }
+      if (consumedPaths.has(lock.path)) {
+        errors.push(`${lock.path}: consumed lock still exists`)
         try { await lock.handle.close() } catch (closeError) { errors.push(`${lock.path}: ${errorText(closeError)}`) }
         continue
       }
@@ -179,53 +205,92 @@ async function acquireWorktreeHeadLocks(worktreeRecords) {
 
   for (const worktree of worktreeRecords) {
     const worktreePath = path.resolve(worktree.path)
-    const headResult = git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-path', 'HEAD'])
-    if (!headResult.ok || !path.isAbsolute(headResult.stdout.trim())) {
-      const released = await release()
-      return {
-        ok: false,
-        error: `${!headResult.ok ? commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--path-format=absolute', '--git-path', 'HEAD'], headResult) : `git returned a non-absolute HEAD path: ${headResult.stdout.trim() || '<empty>'}`}${released.ok ? '' : `; lock release failed: ${released.error}`}`,
-      }
-    }
-    const lockPath = `${headResult.stdout.trim()}.lock`
-    const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0)
-    let handle
-    let identity
-    try {
-      handle = await fs.open(lockPath, flags, 0o600)
-      identity = await handle.stat()
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, worktree: worktreePath })}\n`, 'utf8')
-      acquired.push({ path: lockPath, handle, identity })
-    } catch (error) {
-      if (handle) {
-        try {
-          const current = await fs.lstat(lockPath)
-          if (identity && sameFileIdentity(current, identity)) await fs.unlink(lockPath)
-        } catch {
-          // Preserve an uncertain lock for operator inspection.
+    for (const lockName of lockNames) {
+      const lockTarget = git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-path', lockName])
+      if (!lockTarget.ok || !path.isAbsolute(lockTarget.stdout.trim())) {
+        const releasedResult = await release()
+        return {
+          ok: false,
+          error: `${!lockTarget.ok ? commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--path-format=absolute', '--git-path', lockName], lockTarget) : `git returned a non-absolute ${lockName} path: ${lockTarget.stdout.trim() || '<empty>'}`}${releasedResult.ok ? '' : `; lock release failed: ${releasedResult.error}`}`,
         }
       }
+      const lockPath = `${lockTarget.stdout.trim()}.lock`
+      const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0)
+      let handle
+      let identity
       try {
-        if (handle) await handle.close()
-      } catch {
-        // Preserve the acquisition failure as the actionable diagnostic.
-      }
-      const released = await release()
-      return {
-        ok: false,
-        error: `${lockPath}: ${errorText(error)}${released.ok ? '' : `; lock release failed: ${released.error}`}`,
+        handle = await fs.open(lockPath, flags, 0o600)
+        identity = await handle.stat()
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, lock: lockName, worktree: worktreePath })}\n`, 'utf8')
+        acquired.push({ path: lockPath, handle, identity })
+      } catch (error) {
+        if (handle) {
+          try {
+            const current = await fs.lstat(lockPath)
+            if (identity && sameFileIdentity(current, identity)) await fs.unlink(lockPath)
+          } catch {
+            // Preserve an uncertain lock for operator inspection.
+          }
+        }
+        try {
+          if (handle) await handle.close()
+        } catch {
+          // Preserve the acquisition failure as the actionable diagnostic.
+        }
+        const releasedResult = await release()
+        return {
+          ok: false,
+          error: `${lockPath}: ${errorText(error)}${releasedResult.ok ? '' : `; lock release failed: ${releasedResult.error}`}`,
+        }
       }
     }
   }
-  return { ok: true, release }
+  return { ok: true, release, paths: acquired.map((lock) => lock.path) }
 }
 
-function mergeEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence) {
+async function acquireWorktreeHeadLocks(worktreeRecords) {
+  return acquireWorktreeLocks(worktreeRecords, ['HEAD'])
+}
+
+function patchEquivalence(repo: string, expectedHead: string, defaultRef: string) {
+  const args = ['cherry', defaultRef, expectedHead]
+  const result = git(repo, args)
+  if (!result.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...args], result) }
+  if (result.stdout === '') return { ok: true, merged: false, commit_count: 0 }
+  const newline = result.stdout.endsWith('\r\n') ? '\r\n' : result.stdout.endsWith('\n') ? '\n' : null
+  if (!newline) return { ok: false, error: 'git cherry output is missing its terminal newline' }
+  const body = result.stdout.slice(0, -newline.length)
+  const lines = body.split(/\r?\n/)
+  const objectFormat = gitObjectIdLength(repo)
+  if (!objectFormat.ok) return { ok: false, error: objectFormat.error }
+  const oidPattern = new RegExp(`^[+-] [0-9a-f]{${objectFormat.length}}$`)
+  if (lines.length === 0 || lines.some((line) => line.length === 0 || !oidPattern.test(line))) {
+    return { ok: false, error: 'git cherry returned a malformed patch-equivalence record' }
+  }
+  const commits = lines.map((line) => ({ status: line[0], oid: line.slice(2) }))
+  return {
+    ok: true,
+    merged: commits.length > 0 && commits.every((commit) => commit.status === '-'),
+    commit_count: commits.length,
+  }
+}
+
+function mergeEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head) {
+  if (!isGitObjectId(expectedDefaultHead)) return `invalid expected default ref OID for ${defaultRef}: ${expectedDefaultHead || '<missing>'}`
+  const defaultResult = git(repo, ['rev-parse', '--verify', defaultRef])
+  if (!defaultResult.ok) return commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', defaultRef], defaultResult)
+  const actualDefaultHead = defaultResult.stdout.trim()
+  if (actualDefaultHead !== expectedDefaultHead) return `default ref changed: ${actualDefaultHead || '<missing>'} != ${expectedDefaultHead}`
   if (evidence.method === 'ancestry') {
     return git(repo, ['merge-base', '--is-ancestor', expectedHead, defaultRef]).ok ? null : `${branchRef}@${expectedHead} is no longer an ancestor of ${defaultRef}`
   }
   if (evidence.method === 'github-merge-commit' && evidence.merge_commit) {
     return git(repo, ['merge-base', '--is-ancestor', evidence.merge_commit, defaultRef]).ok ? null : `merge commit ${evidence.merge_commit} is no longer reachable from ${defaultRef}`
+  }
+  if (evidence.method === 'patch-equivalence') {
+    const patch = patchEquivalence(repo, expectedHead, defaultRef)
+    if (!patch.ok) return patch.error || 'git cherry patch-equivalence query failed'
+    return patch.merged ? null : `${branchRef}@${expectedHead} is no longer patch-equivalent to ${defaultRef}`
   }
   return `unsupported merge evidence for ${branchRef}: ${evidence.method || '<missing>'}`
 }
@@ -235,10 +300,12 @@ function mergeEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence)
 // branch upstream when one is configured, so a branch rebased onto and merged into the default
 // branch but never pushed again is refused. The CAS transaction re-verifies the merge evidence
 // and worktree usage while the ref lock is held instead.
-async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expectedHead, defaultRef, evidence) {
+async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], branchRef: string, expectedHead: string, defaultRef: string, expectedDefaultHead: string, evidence: any, allowedWorktreePath: string | null = null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true })) {
   const branchDeleteMethod = evidence.method === 'ancestry'
     ? 'git-update-ref-transaction-cas-with-ancestry-evidence'
-    : 'git-update-ref-transaction-cas-with-merge-evidence'
+    : evidence.method === 'patch-equivalence'
+      ? 'git-update-ref-transaction-cas-with-patch-equivalence-evidence'
+      : 'git-update-ref-transaction-cas-with-merge-evidence'
   const headLocks = await acquireWorktreeHeadLocks(worktreeRecords)
   if (!headLocks.ok) return { ok: false, reason: 'worktree-head-lock-failed', detail: headLocks.error, branch_delete_method: branchDeleteMethod }
   let outcome = { ok: false, reason: 'branch-delete-failed', detail: 'branch deletion did not run', branch_delete_method: branchDeleteMethod }
@@ -246,14 +313,19 @@ async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expecte
     const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
     if (!fencedListing.ok) {
       outcome = { ok: false, reason: 'worktree-list-before-branch-delete-failed', detail: commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], fencedListing), branch_delete_method: branchDeleteMethod }
-    } else if (parseWorktrees(fencedListing.stdout).some((worktree) => worktree.branchRef === branchRef)) {
-      outcome = { ok: false, reason: 'branch-still-used', detail: `${branchRef} is used by another worktree`, branch_delete_method: branchDeleteMethod }
     } else {
-      const refBeforeDelete = git(repo, ['rev-parse', '--verify', branchRef])
+      const allowedPath = allowedWorktreePath ? path.resolve(allowedWorktreePath) : null
+      const branchInUse = parseWorktrees(fencedListing.stdout).some((worktree) => {
+        return worktree.branchRef === branchRef && (!allowedPath || path.resolve(worktree.path) !== allowedPath)
+      })
+      if (branchInUse) {
+        outcome = { ok: false, reason: 'branch-still-used', detail: `${branchRef} is used by another worktree`, branch_delete_method: branchDeleteMethod }
+      } else {
+        const refBeforeDelete = git(repo, ['rev-parse', '--verify', branchRef])
       if (!refBeforeDelete.ok || refBeforeDelete.stdout.trim() !== expectedHead) {
         outcome = { ok: false, reason: 'branch-head-changed-before-delete', detail: !refBeforeDelete.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], refBeforeDelete) : `${branchRef} changed: ${refBeforeDelete.stdout.trim()} != ${expectedHead}`, branch_delete_method: branchDeleteMethod }
       } else {
-        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, () => mergeEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence))
+        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, () => mergeEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead), beforeCommit, allowedWorktreePath)
         if (!branchDelete.ok) {
           let restoreDetail = ''
           if (branchDelete.committed) {
@@ -267,7 +339,7 @@ async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expecte
             }
             if (!branchAfterFailedDelete.ok) restoreDetail = `${restoreDetail}; ref state after failed delete is indeterminate: ${branchAfterFailedDelete.error}`
           }
-          outcome = { ok: false, reason: 'branch-delete-failed', detail: `${branchDelete.error || commandDiagnostic('git', ['-C', repo, 'update-ref', '--stdin'], branchDelete)}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
+          outcome = { ok: false, reason: branchDelete.reason || 'branch-delete-failed', detail: `${branchDelete.error || commandDiagnostic('git', ['-C', repo, 'update-ref', '--stdin'], branchDelete)}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
         } else {
           const branchAfterDelete = verifyRefAbsent(repo, branchRef)
           const listingAfterBranchDelete = git(repo, ['worktree', 'list', '--porcelain', '-z'])
@@ -287,6 +359,7 @@ async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expecte
         }
       }
     }
+    }
   } finally {
     const released = await headLocks.release()
     if (!released.ok) {
@@ -304,6 +377,219 @@ async function deleteLocalBranchSafely(repo, worktreeRecords, branchRef, expecte
 
 function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino
+}
+
+async function captureWorktreeRegistrationIdentity(worktreePath: string) {
+  const gitDirResult = git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-dir'])
+  const gitDir = gitDirResult.stdout.trim()
+  if (!gitDirResult.ok) return { ok: false, error: commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--path-format=absolute', '--git-dir'], gitDirResult) }
+  if (!gitDir || !path.isAbsolute(gitDir)) return { ok: false, error: `worktree git directory is not absolute: ${gitDir || '<empty>'}` }
+  try {
+    const realPath = await fs.realpath(gitDir)
+    const identity = await fs.lstat(gitDir)
+    return { ok: true, path: path.resolve(gitDir), realPath, identity }
+  } catch (error) {
+    return { ok: false, error: `worktree registration identity query failed for ${gitDir}: ${errorText(error)}` }
+  }
+}
+
+function registrationIdentityMismatch(expected: any, actual: any, label = 'worktree registration') {
+  if (!actual.ok) return actual.error
+  if (actual.path !== expected.path) return `${label} path changed: ${actual.path} != ${expected.path}`
+  if (actual.realPath !== expected.realPath) return `${label} realpath changed: ${actual.realPath} != ${expected.realPath}`
+  if (!sameFileIdentity(actual.identity, expected.identity)) return `${label} filesystem identity changed`
+  return null
+}
+
+async function verifyExistingRegistrationFence(repo: string, worktreePath: string, expectedRegistration: any, lockReason: string) {
+  const listingArgs = ['worktree', 'list', '--porcelain', '-z']
+  const listing = git(repo, listingArgs)
+  if (!listing.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...listingArgs], listing) }
+  const resolvedPath = path.resolve(worktreePath)
+  const registered = parseWorktrees(listing.stdout).find((worktree) => path.resolve(worktree.path) === resolvedPath)
+  if (!registered) return { ok: false, error: `worktree registration disappeared before Compose teardown: ${resolvedPath}` }
+  if (registered.locked !== lockReason) return { ok: false, error: `worktree registration lock changed before Compose teardown: ${registered.locked || '<missing>'} != ${lockReason}` }
+  const actual = await captureWorktreeRegistrationIdentity(worktreePath)
+  const identityError = registrationIdentityMismatch(expectedRegistration, actual, 'worktree registration before Compose teardown')
+  return identityError ? { ok: false, error: identityError } : { ok: true }
+}
+
+// 初回の worktree 一覧より先に registration 自体へロックを置く。path を一覧後に
+// lock するだけでは、同じ path・branch・HEAD の replacement を元の対象と誤認できる。
+const INITIAL_REGISTRATION_LOCK_REASON = 'clean-merged-branches initial identity fence'
+
+async function readWorktreeRegistrationEntry(registrationPath: string) {
+  try {
+    const entryPath = path.resolve(registrationPath)
+    const entryIdentity = await fs.lstat(entryPath)
+    if (!entryIdentity.isDirectory()) return { ok: false, error: `${entryPath} is not a worktree registration directory` }
+    const gitdirFile = path.join(entryPath, 'gitdir')
+    const contents = (await fs.readFile(gitdirFile, 'utf8')).trim()
+    const target = contents.replace(/^gitdir:\s*/, '').trim()
+    if (!target) return { ok: false, error: `${gitdirFile} does not contain a valid gitdir record` }
+    const gitdirPath = path.resolve(entryPath, target)
+    const worktreePath = path.dirname(gitdirPath)
+    const realPath = await fs.realpath(entryPath)
+    const realWorktreePath = await fs.realpath(worktreePath)
+    return { ok: true, path: entryPath, realPath, identity: entryIdentity, gitdirPath, worktreePath, realWorktreePath }
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    return { ok: false, code, error: `worktree registration identity query failed for ${registrationPath}: ${errorText(error)}` }
+  }
+}
+
+async function openWorktreeRegistrationEntry(registrationPath: string) {
+  let entryHandle = null
+  try {
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY || 0) | (fsConstants.O_NOFOLLOW || 0)
+    entryHandle = await fs.open(registrationPath, flags)
+    const entryIdentity = await entryHandle.stat()
+    const registration = await readWorktreeRegistrationEntry(registrationPath)
+    if (!registration.ok) {
+      await entryHandle.close()
+      return registration
+    }
+    const currentIdentity = await fs.lstat(registration.path)
+    if (!sameFileIdentity(currentIdentity, entryIdentity)) {
+      await entryHandle.close()
+      return { ok: false, error: `${registration.path}: registration directory changed while it was opened` }
+    }
+    return { ...registration, identity: entryIdentity, entryHandle }
+  } catch (error) {
+    if (entryHandle) {
+      try { await entryHandle.close() } catch { /* Preserve the acquisition failure. */ }
+    }
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    return { ok: false, code, error: `worktree registration entry open failed for ${registrationPath}: ${errorText(error)}` }
+  }
+}
+
+async function acquireInitialRegistrationFences(repo: string) {
+  const commonDirResult = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!commonDirResult.ok || !path.isAbsolute(commonDirResult.stdout.trim())) {
+    return {
+      ok: false,
+      error: !commonDirResult.ok
+        ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'], commonDirResult)
+        : `git common directory is not absolute: ${commonDirResult.stdout.trim() || '<empty>'}`,
+    }
+  }
+  let allowedRoot: string
+  try {
+    allowedRoot = await fs.realpath(path.join(repo, '.worktree'))
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    if (code === 'ENOENT') return { ok: true, fences: new Map(), allowedRoot: null, release: async () => ({ ok: true }) }
+    return { ok: false, error: `eligible worktree root query failed: ${errorText(error)}` }
+  }
+  if (!isWithin(allowedRoot, repo)) return { ok: false, error: `eligible worktree root escapes repository: ${allowedRoot}` }
+  const registrationRoot = path.join(commonDirResult.stdout.trim(), 'worktrees')
+  let entries
+  try {
+    entries = await fs.readdir(registrationRoot, { withFileTypes: true })
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    if (code === 'ENOENT') return { ok: true, fences: new Map(), allowedRoot, release: async () => ({ ok: true }) }
+    return { ok: false, error: `worktree registration directory query failed: ${errorText(error)}` }
+  }
+
+  const states: any[] = []
+  const fences = new Map()
+  let released = false
+  const release = async () => {
+    if (released) return { ok: true }
+    released = true
+    const errors: string[] = []
+    for (const state of [...states].reverse()) {
+      if (state.released) continue
+      if (state.owned && !state.retain) {
+        try {
+          const currentEntry = await fs.lstat(state.registration.path)
+          if (!sameFileIdentity(currentEntry, state.registration.identity)) {
+            errors.push(`${state.registration.path}: registration identity changed before initial lock release`)
+          } else {
+            const current = await fs.lstat(state.lockPath)
+            if (!sameFileIdentity(current, state.lockIdentity)) {
+              errors.push(`${state.lockPath}: initial registration lock identity changed before release`)
+            } else {
+              await fs.unlink(state.lockPath)
+            }
+          }
+        } catch (error) {
+          const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+          if (code !== 'ENOENT') errors.push(`${state.lockPath}: initial registration lock release failed: ${errorText(error)}`)
+        }
+      }
+      if (state.handle) {
+        try {
+          await state.handle.close()
+        } catch (error) {
+          errors.push(`${state.lockPath}: initial registration lock handle close failed: ${errorText(error)}`)
+        }
+      }
+      if (state.entryHandle) {
+        try {
+          await state.entryHandle.close()
+        } catch (error) {
+          errors.push(`${state.registration.path}: worktree registration directory handle close failed: ${errorText(error)}`)
+        }
+      }
+      state.released = true
+    }
+    return errors.length === 0 ? { ok: true } : { ok: false, error: errors.join('; ') }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const registrationPath = path.join(registrationRoot, entry.name)
+    const registration = await openWorktreeRegistrationEntry(registrationPath)
+    if (!registration.ok) {
+      if (registration.code === 'ENOENT') continue
+      const releasedResult = await release()
+      return { ok: false, error: `${registration.error}${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
+    }
+    if (!isWithin(registration.realWorktreePath, allowedRoot)) {
+      await (registration as any).entryHandle.close()
+      continue
+    }
+    const candidate = path.resolve(registration.worktreePath)
+    if (fences.has(candidate)) {
+      const releasedResult = await release()
+      return { ok: false, error: `multiple worktree registrations resolve to ${candidate}${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
+    }
+    const lockPath = path.join(registration.path, 'locked')
+    const state: any = { candidate, registration, lockPath, entryHandle: (registration as any).entryHandle, handle: null, owned: false, lockIdentity: null, retain: false, released: false }
+    states.push(state)
+    try {
+      const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0)
+      const handle = await fs.open(lockPath, flags, 0o600)
+      const lockIdentity = await handle.stat()
+      await handle.writeFile(`${INITIAL_REGISTRATION_LOCK_REASON}\n`, 'utf8')
+      state.handle = handle
+      state.lockIdentity = lockIdentity
+      state.owned = true
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+      if (code !== 'EEXIST') {
+        const releasedResult = await release()
+        return { ok: false, error: `${lockPath}: initial registration fence failed: ${errorText(error)}${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
+      }
+    }
+    try {
+      const currentEntry = await fs.lstat(registration.path)
+      if (!sameFileIdentity(currentEntry, registration.identity)) {
+        const releasedResult = await release()
+        return { ok: false, error: `${registration.path}: registration identity changed while acquiring the initial fence${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
+      }
+    } catch (error) {
+      const releasedResult = await release()
+      return { ok: false, error: `${registration.path}: registration identity verification failed: ${errorText(error)}${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
+    }
+    fences.set(candidate, state)
+    const realCandidate = path.resolve(registration.realWorktreePath)
+    if (realCandidate !== candidate) fences.set(realCandidate, state)
+  }
+  return { ok: true, fences, allowedRoot, release }
 }
 
 function errorText(error) {
@@ -528,6 +814,69 @@ function parseWorktrees(output: string) {
   }
   if (typeof current.path === 'string') records.push({ ...current, path: current.path })
   return records
+}
+
+// The prepared ref transaction protects refs, not the pathname of a worktree registration.
+// Re-read registration, filesystem identity, HEAD, and branch immediately before removal.
+async function inspectWorktreeIdentity(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, allowedRoot: string, expectedRegistration: any, expectedLockReason: string | null = null) {
+  const resolvedPath = path.resolve(worktreePath)
+  const listingArgs = ['worktree', 'list', '--porcelain', '-z']
+  const listing = git(repo, listingArgs)
+  if (!listing.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...listingArgs], listing) }
+  const registered = parseWorktrees(listing.stdout).find((worktree) => path.resolve(worktree.path) === resolvedPath)
+  if (!registered) return { ok: false, error: `quarantine worktree disappeared before removal: ${resolvedPath}` }
+  const issues: string[] = []
+  if (registered.head !== expectedHead) issues.push(`HEAD changed before removal: ${registered.head || '<missing>'} != ${expectedHead}`)
+  if (registered.branchRef !== expectedBranchRef) issues.push(`branch changed before removal: ${registered.branchRef || '<missing>'} != ${expectedBranchRef}`)
+  if (expectedLockReason !== null && registered.locked !== expectedLockReason) issues.push(`registration lock changed before removal: ${registered.locked || '<missing>'} != ${expectedLockReason}`)
+  const registration = await captureWorktreeRegistrationIdentity(worktreePath)
+  const registrationError = registrationIdentityMismatch(expectedRegistration, registration, 'quarantine worktree registration')
+  if (registrationError) issues.push(registrationError)
+  // The caller acquires the registration lock immediately before this check.
+  // A pre-existing lock cannot be acquired and is rejected by `worktree lock`.
+  if (registered.prunable !== undefined) issues.push('quarantine worktree became prunable before removal')
+  let realPath: string | null = null
+  try {
+    realPath = await fs.realpath(worktreePath)
+  } catch (error) {
+    issues.push(`quarantine realpath failed before removal: ${errorText(error)}`)
+  }
+  if (realPath !== resolvedPath) issues.push(`quarantine path changed before removal: ${realPath || '<missing>'}`)
+  if (realPath && !isWithin(realPath, allowedRoot)) issues.push(`quarantine path escaped allowed root before removal: ${realPath}`)
+  const head = git(worktreePath, ['rev-parse', '--verify', 'HEAD'])
+  if (!head.ok || head.stdout.trim() !== expectedHead) issues.push(!head.ok ? commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--verify', 'HEAD'], head) : `worktree HEAD changed before removal: ${head.stdout.trim()} != ${expectedHead}`)
+  const branch = git(worktreePath, ['symbolic-ref', '-q', 'HEAD'])
+  if (!branch.ok || branch.stdout.trim() !== expectedBranchRef) issues.push(!branch.ok ? commandDiagnostic('git', ['-C', worktreePath, 'symbolic-ref', '-q', 'HEAD'], branch) : `worktree branch changed before removal: ${branch.stdout.trim()} != ${expectedBranchRef}`)
+  const statusArgs = ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all']
+  const status = git(worktreePath, statusArgs)
+  if (!status.ok) issues.push(commandDiagnostic('git', ['-C', worktreePath, ...statusArgs], status))
+  else if (status.stdout.length > 0) issues.push('worktree became dirty before removal')
+  const ignored = ignoredFiles(worktreePath)
+  if (!ignored.ok) issues.push(commandDiagnostic('git', ['-C', worktreePath, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignored))
+  else if (ignored.stdout.length > 0) issues.push('ignored files appeared before removal')
+  return issues.length === 0 ? { ok: true } : { ok: false, error: issues.join('; ') }
+}
+
+// Git's registration lock is the enforceable fence between the final identity
+// check and `worktree remove`: a normal concurrent `remove`/`move`/`add` cannot
+// replace the registration while this lock is held. A single `--force` also
+// respects it; the cleanup's double-force is used only after all dirty-state
+// checks have passed because Git otherwise refuses to remove a locked tree.
+async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, allowedRoot: string, expectedRegistration: any, existingLockReason: string | null = null) {
+  let acquiredHere = false
+  let lockArgs = null
+  if (existingLockReason === null) {
+    lockArgs = ['worktree', 'lock', '--reason', 'clean-merged-branches removal fence', worktreePath]
+    const locked = git(repo, lockArgs)
+    if (!locked.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...lockArgs], locked) }
+    acquiredHere = true
+  }
+  const identity = await inspectWorktreeIdentity(repo, worktreePath, expectedHead, expectedBranchRef, allowedRoot, expectedRegistration, existingLockReason)
+  if (identity.ok) return { ok: true, registrationLocked: true }
+  const unlockArgs = ['worktree', 'unlock', worktreePath]
+  const unlocked = acquiredHere ? git(repo, unlockArgs) : { ok: true }
+  const unlockError = unlocked.ok ? '' : `; ${commandDiagnostic('git', ['-C', repo, ...unlockArgs], unlocked)}`
+  return { ok: false, error: `${identity.error}${unlockError}` }
 }
 
 function pruneWorktreeRegistrations(repo, apply) {
@@ -870,10 +1219,11 @@ function queryMergedPulls(target, defaultName, oidLength, limit, headBranch = nu
   return { ok: true, pulls, truncated: pulls.length >= limit }
 }
 
-// Resolves merged-PR evidence with one `gh pr list` per repository. The batch is fetched lazily on
-// the first candidate that is not already proven by ancestry and is shared by the worktree and
-// unattached-branch passes. When the batch hits its limit, a branch without a match in the batch
-// falls back to a per-branch `--head` query so older PRs are still found.
+// Resolves merged-PR evidence with one `gh pr list` per repository. A local branch head
+// can match the merged PR head exactly or be an ancestor of it. The batch is fetched lazily
+// and a truncated batch falls back to a per-branch `--head` query. When PR evidence is absent,
+// the resolver falls back to read-only `git cherry` patch-equivalence evidence so local merges,
+// cherry-picks, and non-GitHub repositories can still be cleaned safely.
 function createMergedPrLookup(repo, defaultName, defaultRef) {
   let context = null
   let batch = null
@@ -890,11 +1240,15 @@ function createMergedPrLookup(repo, defaultName, defaultRef) {
   function matchPulls(pulls, target, head) {
     let unreachable = null
     for (const pull of pulls) {
-      if (pull.headRefOid !== head) continue
+      const exactHead = pull.headRefOid === head
+      const ancestorHead = !exactHead
+        && git(repo, ['cat-file', '-e', `${pull.headRefOid}^{commit}`]).ok
+        && git(repo, ['merge-base', '--is-ancestor', head, pull.headRefOid]).ok
+      if (!exactHead && !ancestorHead) continue
       const mergeCommit = pull.mergeCommit?.oid
       const mergeCommitExists = mergeCommit && git(repo, ['cat-file', '-e', `${mergeCommit}^{commit}`]).ok
       const mergeCommitReachable = mergeCommitExists && git(repo, ['merge-base', '--is-ancestor', mergeCommit, defaultRef]).ok
-      if (mergeCommitReachable) return { ok: true, match: pull, repository: target, mergedHead: head, mergeCommit }
+      if (mergeCommitReachable) return { ok: true, match: pull, repository: target, mergedHead: head, prHead: pull.headRefOid, headRelation: exactHead ? 'exact' : 'ancestor', mergeCommit }
       unreachable ||= { pull, mergeCommit: mergeCommit || null }
     }
     if (unreachable) return { ok: false, code: 'merge-evidence-unreachable', error: `PR #${unreachable.pull.number} merge commit is not reachable from ${defaultRef}`, repository: target, mergeCommit: unreachable.mergeCommit }
@@ -911,6 +1265,53 @@ function createMergedPrLookup(repo, defaultName, defaultRef) {
     if (!single.ok) return { ...single, repository: ctx.target }
     return matchPulls(single.pulls.filter((pull) => pull.headRefName === branch), ctx.target, head)
   }
+}
+
+function resolveMergeEvidence(repo: string, branch: string, head: string, defaultRef: string, defaultHead: string, mergedPrEvidence: (branch: string, head: string) => any) {
+  const pr = mergedPrEvidence(branch, head)
+  if (pr.ok && pr.match) {
+    return {
+      ok: true,
+      evidence: {
+        method: 'github-merge-commit',
+        pr: pr.match.url,
+        number: pr.match.number,
+        merged_at: pr.match.mergedAt,
+        merge_commit: pr.mergeCommit,
+        pr_head: pr.prHead,
+        head_relation: pr.headRelation,
+        default_ref: defaultRef,
+        default_head: defaultHead,
+      },
+    }
+  }
+
+  const patch = patchEquivalence(repo, head, defaultRef)
+  if (patch.ok && patch.merged) {
+    return {
+      ok: true,
+      evidence: {
+        method: 'patch-equivalence',
+        default_ref: defaultRef,
+        default_head: defaultHead,
+        commit_count: patch.commit_count,
+      },
+    }
+  }
+  if (!pr.ok) {
+    if (!patch.ok) {
+      return {
+        ok: false,
+        code: 'patch-equivalence-query-failed',
+        error: `${patch.error}; PR evidence unavailable: ${pr.error}`,
+        repository: pr.repository,
+        pr_error: { code: pr.code, detail: pr.error },
+      }
+    }
+    return pr
+  }
+  if (!patch.ok) return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error }
+  return { ok: true, evidence: null }
 }
 
 async function inspectRepository(repo, apply, explicitDefaultBranch) {
@@ -935,14 +1336,78 @@ async function inspectRepository(repo, apply, explicitDefaultBranch) {
 }
 
 async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch) {
-  const results = []
+  const results: any[] = []
+  const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo) : { ok: true, fences: new Map(), release: async () => ({ ok: true }) }
+  if (!initialFences.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-registration-fence-failed', detail: initialFences.error }]
   const listing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
-  if (!listing.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-list-failed', detail: listing.stderr.trim() }]
+  if (!listing.ok) {
+    const released = await initialFences.release()
+    return [{ repo: realRepo, action: 'error', reason: 'worktree-list-failed', detail: `${listing.stderr.trim()}${released.ok ? '' : `; initial registration fence release failed: ${released.error}`}` }]
+  }
   let worktrees = parseWorktrees(listing.stdout)
   let rootRecord = worktrees.find((item) => path.resolve(item.path) === realRepo)
-  if (!rootRecord) return [{ repo: realRepo, action: 'error', reason: 'root-worktree-not-found' }]
+  if (!rootRecord) {
+    const released = await initialFences.release()
+    return [{ repo: realRepo, action: 'error', reason: 'root-worktree-not-found', detail: released.ok ? undefined : `initial registration fence release failed: ${released.error}` }]
+  }
   let candidateWorktrees = worktrees.filter((item) => path.resolve(item.path) !== realRepo)
+  const initialRegistrationIdentities = new Map()
+  const initialRegistrationFences: Array<{ candidate: string; beforeLockIdentity: any; fence: any }> = []
+  if (apply) {
+    for (const item of candidateWorktrees.filter((candidate) => candidate.prunable === undefined)) {
+      const candidate = path.resolve(item.path)
+      let realCandidate
+      try {
+        realCandidate = await fs.realpath(candidate)
+      } catch {
+        realCandidate = null
+      }
+      if (!initialFences.allowedRoot || !realCandidate || !isWithin(realCandidate, initialFences.allowedRoot)) continue
+      const fence = initialFences.fences.get(candidate)
+      if (item.locked !== undefined && !fence?.owned) continue
+      if (!fence?.owned) {
+        initialRegistrationIdentities.set(candidate, { ok: false, error: 'candidate registration was not fenced before the initial worktree listing' })
+        continue
+      }
+      const identity = await captureWorktreeRegistrationIdentity(candidate)
+      const identityError = registrationIdentityMismatch(fence.registration, identity, 'initial registration')
+      if (identityError) {
+        initialRegistrationIdentities.set(candidate, { ok: false, error: identityError })
+      } else {
+        initialRegistrationFences.push({ candidate, beforeLockIdentity: identity, fence })
+      }
+    }
+  }
+  const initialBranches = listLocalBranches(realRepo)
+  if (!initialBranches.ok) {
+    const released = await initialFences.release()
+    return [{ repo: realRepo, action: 'error', reason: 'branch-list-failed', detail: `${initialBranches.error}${released.ok ? '' : `; initial registration fence release failed: ${released.error}`}` }]
+  }
+  const initialBranchHeads = new Map((initialBranches as any).branches.map((branch: any) => [branch.ref, branch.oid]))
+  if (apply) {
+    for (const fence of initialRegistrationFences) {
+      const identity = await captureWorktreeRegistrationIdentity(fence.candidate)
+      const identityError = registrationIdentityMismatch(fence.beforeLockIdentity, identity, 'initial registration')
+      if (identityError) {
+        initialRegistrationIdentities.set(fence.candidate, { ok: false, error: identityError })
+      } else {
+        initialRegistrationIdentities.set(fence.candidate, identity)
+      }
+    }
+    const initialIdentityFailures = [...initialRegistrationIdentities.entries()].filter(([, identity]) => !identity?.ok)
+    if (initialIdentityFailures.length > 0) {
+      const released = await initialFences.release()
+      return [{
+        repo: realRepo,
+        action: 'error',
+        reason: 'worktree-registration-identity-failed',
+        detail: `${initialIdentityFailures.map(([candidate, identity]) => `${candidate}: ${identity.error || 'registration identity was not captured'}`).join('; ')}${released.ok ? '' : `; initial registration fence release failed: ${released.error}`}`,
+      }]
+    }
+  }
   const initialPrunable = candidateWorktrees.filter((item) => item.prunable !== undefined)
+  let registrationFenceFailure = false
+  try {
   const plannedPrunablePaths = new Set(initialPrunable.map((item) => path.resolve(item.path)))
 
   // Prune stale registrations before checking repository state or classifying candidates.
@@ -982,7 +1447,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     : [...results, item]
   let defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
   if (!defaultInfo) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-not-found' })
-  let dirtyRefresh = null
+  let dirtyRefresh: any = null
   if (apply) {
     const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
     if (!refreshed.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status })
@@ -1003,7 +1468,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     return prerequisiteFailure({ repo: realRepo, action: 'skip', severity: 'warn', reason: dirtyRefresh.code, detail: dirtyRefresh.error, dirty_status: dirtyRefresh.dirty_status })
   }
   const allowedRoot = path.join(realRepo, '.worktree')
-  let realAllowedRoot = null
+  let realAllowedRoot: string | null = null
   try {
     const resolvedAllowedRoot = await fs.realpath(allowedRoot)
     if (isWithin(resolvedAllowedRoot, realRepo)) realAllowedRoot = resolvedAllowedRoot
@@ -1024,14 +1489,15 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     try {
       realCandidate = await fs.realpath(candidate)
     } catch (error) {
-      results.push({ ...base, action: 'error', reason: 'candidate-realpath-failed', detail: error.message })
+      results.push({ ...base, action: 'error', reason: 'candidate-realpath-failed', detail: errorText(error) })
       continue
     }
     if (!realAllowedRoot || !isWithin(realCandidate, realAllowedRoot)) {
       results.push({ ...base, action: 'skip', reason: 'outside-repo-worktree-root' })
       continue
     }
-    if (item.locked !== undefined) {
+    const initialFence = apply ? initialFences.fences.get(candidate) : null
+    if (item.locked !== undefined && !initialFence?.owned) {
       results.push({ ...base, action: 'skip', reason: 'locked', detail: item.locked })
       continue
     }
@@ -1061,15 +1527,15 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
     let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
     if (!evidence) {
-      const pr = mergedPrEvidence(base.branch, item.head)
-      if (!pr.ok) {
-        results.push({ ...base, action: 'error', reason: pr.code, detail: pr.error, repository: pr.repository })
+      const resolved = resolveMergeEvidence(realRepo, base.branch || '', item.head || '', defaultInfo.ref, defaultHead, mergedPrEvidence)
+      if (!resolved.ok) {
+        results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
         continue
       }
-      if (pr.match) evidence = { method: 'github-merge-commit', pr: pr.match.url, number: pr.match.number, merged_at: pr.match.mergedAt, merge_commit: pr.mergeCommit, default_ref: defaultInfo.ref, default_head: defaultHead }
+      evidence = resolved.evidence
     }
     if (!evidence) {
-      results.push({ ...base, action: 'skip', reason: 'not-merged' })
+      results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
       continue
     }
     const refBeforeRemove = git(realRepo, ['rev-parse', '--verify', item.branchRef])
@@ -1095,6 +1561,27 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-before-remove', evidence })
       continue
     }
+    if (evidence.method === 'patch-equivalence') {
+      const patchError = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      if (patchError) {
+        results.push({ ...base, action: 'error', reason: 'patch-equivalence-changed-before-remove', detail: patchError, evidence })
+        continue
+      }
+    }
+    const registrationBeforeQuarantine = apply ? initialRegistrationIdentities.get(candidate) : null
+    if (apply && !registrationBeforeQuarantine?.ok) {
+      registrationFenceFailure = true
+      results.push({ ...base, action: 'error', reason: 'worktree-registration-identity-failed', detail: registrationBeforeQuarantine?.error || 'candidate registration was not present in the initial worktree snapshot', evidence })
+      continue
+    }
+    if (apply) {
+      const preComposeFence = await verifyExistingRegistrationFence(realRepo, candidate, registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
+      if (!preComposeFence.ok) {
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: 'worktree-registration-identity-failed', detail: preComposeFence.error, evidence })
+        continue
+      }
+    }
     const compose = composeTeardownForWorktree(candidate, apply)
     if (!compose.ok) {
       results.push({ ...base, action: 'error', reason: compose.code, detail: compose.error, evidence, compose })
@@ -1105,17 +1592,21 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       continue
     }
     const quarantine = path.join(realAllowedRoot, `.cleanup-${path.basename(candidate)}-${randomBytes(16).toString('hex')}`)
-    const movedToQuarantine = git(realRepo, ['worktree', 'move', candidate, quarantine])
+    const movedToQuarantine = git(realRepo, ['worktree', 'move', '-f', '-f', candidate, quarantine])
     if (!movedToQuarantine.ok) {
+      registrationFenceFailure = true
       results.push({ ...base, action: 'error', reason: 'worktree-quarantine-move-failed', detail: movedToQuarantine.stderr.trim(), evidence })
       continue
     }
-    const restoreQuarantine = () => git(realRepo, ['worktree', 'move', quarantine, candidate])
+    const restoreQuarantine = () => git(realRepo, ['worktree', 'move', '-f', '-f', quarantine, candidate])
     const quarantinedHead = git(quarantine, ['rev-parse', '--verify', 'HEAD'])
     const quarantinedBranch = git(quarantine, ['symbolic-ref', '-q', 'HEAD'])
-    if (!quarantinedHead.ok || quarantinedHead.stdout.trim() !== item.head || !quarantinedBranch.ok || quarantinedBranch.stdout.trim() !== item.branchRef) {
-      const restored = restoreQuarantine()
-      results.push({ ...base, action: 'error', reason: 'worktree-head-or-branch-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
+    const registrationAfterQuarantine = await captureWorktreeRegistrationIdentity(quarantine)
+    const registrationAfterQuarantineError = registrationIdentityMismatch(registrationBeforeQuarantine, registrationAfterQuarantine, 'quarantine worktree registration')
+    if (!quarantinedHead.ok || quarantinedHead.stdout.trim() !== item.head || !quarantinedBranch.ok || quarantinedBranch.stdout.trim() !== item.branchRef || registrationAfterQuarantineError) {
+      if (registrationAfterQuarantineError) registrationFenceFailure = true
+      const restored = registrationAfterQuarantineError ? { ok: false, stderr: `quarantine retained: ${registrationAfterQuarantineError}` } : restoreQuarantine()
+      results.push({ ...base, action: 'error', reason: registrationAfterQuarantineError ? 'worktree-registration-changed-after-quarantine' : 'worktree-head-or-branch-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
     const statusBeforeRemove = git(quarantine, ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
@@ -1163,7 +1654,9 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     } catch {
       // Reported by the combined post-quarantine identity check below.
     }
-    if (!statusAfterQuarantine.ok || statusAfterQuarantine.stdout.length > 0 || !headAfterQuarantine.ok || headAfterQuarantine.stdout.trim() !== item.head || !branchAfterQuarantine.ok || branchAfterQuarantine.stdout.trim() !== item.branchRef || !refAfterQuarantine.ok || refAfterQuarantine.stdout.trim() !== item.head || !defaultAfterQuarantine.ok || defaultAfterQuarantine.stdout.trim() !== defaultHead || !registeredAfterQuarantine || registeredAfterQuarantine.locked !== undefined || realQuarantineAfterQuarantine !== path.resolve(quarantine) || !isWithin(realQuarantineAfterQuarantine, realAllowedRoot)) {
+    const quarantineFenceLost = !registeredAfterQuarantine || registeredAfterQuarantine.locked !== INITIAL_REGISTRATION_LOCK_REASON || realQuarantineAfterQuarantine !== path.resolve(quarantine) || !isWithin(realQuarantineAfterQuarantine, realAllowedRoot)
+    if (!statusAfterQuarantine.ok || statusAfterQuarantine.stdout.length > 0 || !headAfterQuarantine.ok || headAfterQuarantine.stdout.trim() !== item.head || !branchAfterQuarantine.ok || branchAfterQuarantine.stdout.trim() !== item.branchRef || !refAfterQuarantine.ok || refAfterQuarantine.stdout.trim() !== item.head || !defaultAfterQuarantine.ok || defaultAfterQuarantine.stdout.trim() !== defaultHead || quarantineFenceLost) {
+      if (quarantineFenceLost) registrationFenceFailure = true
       const restored = restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'worktree-state-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
@@ -1174,9 +1667,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'remote-default-changed-after-quarantine', detail: `${remoteAfterQuarantine.ok ? `${remoteAfterQuarantine.oid} != ${defaultHead}` : remoteAfterQuarantine.error}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
-    const mergeEvidenceStillValid = evidence.method === 'ancestry'
-      ? git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
-      : git(realRepo, ['merge-base', '--is-ancestor', evidence.merge_commit, defaultInfo.ref]).ok
+    const mergeEvidenceStillValid = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
     if (!mergeEvidenceStillValid) {
       const restored = restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
@@ -1231,16 +1722,17 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
         // Reported by the post-clean identity check below.
       }
       const remoteAfterClean = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
-      const mergeEvidenceAfterClean = evidence.method === 'ancestry'
-        ? git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
-        : git(realRepo, ['merge-base', '--is-ancestor', evidence.merge_commit, defaultInfo.ref]).ok
+      const mergeEvidenceAfterClean = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
       const postCleanIssues = []
       if (!headAfterClean.ok || headAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!headAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'rev-parse', '--verify', 'HEAD'], headAfterClean) : `HEAD changed after ignored cleanup: ${headAfterClean.stdout.trim()} != ${item.head}`)
       if (!branchAfterClean.ok || branchAfterClean.stdout.trim() !== item.branchRef) postCleanIssues.push(!branchAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'symbolic-ref', '-q', 'HEAD'], branchAfterClean) : `branch changed after ignored cleanup: ${branchAfterClean.stdout.trim()} != ${item.branchRef}`)
       if (!refAfterClean.ok || refAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!refAfterClean.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', item.branchRef], refAfterClean) : `branch ref changed after ignored cleanup: ${refAfterClean.stdout.trim()} != ${item.head}`)
       if (!defaultAfterClean.ok || defaultAfterClean.stdout.trim() !== defaultHead) postCleanIssues.push(!defaultAfterClean.ok ? commandDiagnostic('git', ['-C', realRepo, 'rev-parse', '--verify', defaultInfo.ref], defaultAfterClean) : `default ref changed after ignored cleanup: ${defaultAfterClean.stdout.trim()} != ${defaultHead}`)
       if (!listingAfterClean.ok) postCleanIssues.push(commandDiagnostic('git', ['-C', realRepo, 'worktree', 'list', '--porcelain', '-z'], listingAfterClean))
-      else if (!registeredAfterClean || registeredAfterClean.locked !== undefined) postCleanIssues.push('quarantine worktree registration changed or became locked after ignored cleanup')
+      else if (!registeredAfterClean || registeredAfterClean.locked !== INITIAL_REGISTRATION_LOCK_REASON) {
+        registrationFenceFailure = true
+        postCleanIssues.push('quarantine worktree registration changed or lost the initial identity fence after ignored cleanup')
+      }
       if (realQuarantineAfterClean !== path.resolve(quarantine) || !isWithin(realQuarantineAfterClean, realAllowedRoot)) postCleanIssues.push(`quarantine path changed after ignored cleanup: ${realQuarantineAfterClean || '<missing>'}`)
       if (!remoteAfterClean.ok || remoteAfterClean.oid !== defaultHead) postCleanIssues.push(remoteAfterClean.ok ? `remote default changed after ignored cleanup: ${remoteAfterClean.oid} != ${defaultHead}` : remoteAfterClean.error)
       if (!mergeEvidenceAfterClean) postCleanIssues.push('merge evidence is no longer valid after ignored cleanup')
@@ -1257,28 +1749,69 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
         continue
       }
     }
-    const removed = git(realRepo, ['worktree', 'remove', quarantine])
-    if (!removed.ok) {
-      const restored = restoreQuarantine()
-      results.push({ ...base, action: 'error', reason: 'worktree-remove-failed', detail: `${commandDiagnostic('git', ['-C', realRepo, 'worktree', 'remove', quarantine], removed)}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence, ignored_files_removed: ignoredFilesRemoved })
-      continue
+    const quarantinePath = path.resolve(quarantine)
+    const headLockRecords = parseWorktrees(listingAfterQuarantine.stdout)
+      .filter((worktree) => path.resolve(worktree.path) !== quarantinePath)
+    const beforeCommit = async () => {
+      const contentLocks: any = await acquireWorktreeLocks([{ path: quarantine }], ['HEAD', 'index'])
+      if (!contentLocks.ok) return { ok: false, reason: 'worktree-content-lock-failed', error: contentLocks.error }
+      const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', realAllowedRoot, registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
+      if (!identity.ok) {
+        const released = await contentLocks.release()
+        return { ok: false, reason: 'worktree-identity-changed-before-remove', error: `${identity.error}${released.ok ? '' : `; content lock release failed: ${released.error}`}` }
+      }
+      const removeArgs = ['worktree', 'remove', '-f', '-f', quarantine]
+      const removed = git(realRepo, removeArgs)
+      if (!removed.ok) {
+        initialFence.retain = true
+        const released = await contentLocks.release()
+        return {
+          ok: false,
+          reason: 'worktree-remove-failed',
+          error: `${commandDiagnostic('git', ['-C', realRepo, ...removeArgs], removed)}; quarantine registration lock retained for manual inspection${released.ok ? '' : `; content lock release failed: ${released.error}`}`,
+        }
+      }
+      const consumedContentLocks = await contentLocks.release(new Set(contentLocks.paths))
+      if (!consumedContentLocks.ok) return { ok: false, reason: 'worktree-content-lock-release-failed', error: consumedContentLocks.error }
+      const verifyListing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
+      const stillPresent = verifyListing.ok && parseWorktrees(verifyListing.stdout).some((worktree) => path.resolve(worktree.path) === quarantinePath)
+      let pathStillPresent = false
+      try {
+        await fs.lstat(quarantine)
+        pathStillPresent = true
+      } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+        if (code !== 'ENOENT') pathStillPresent = true
+      }
+      if (!verifyListing.ok || stillPresent || pathStillPresent) {
+        return {
+          ok: false,
+          reason: 'worktree-remove-unverified',
+          error: !verifyListing.ok
+            ? commandDiagnostic('git', ['-C', realRepo, 'worktree', 'list', '--porcelain', '-z'], verifyListing)
+            : stillPresent
+              ? `${quarantine} is still registered after worktree remove`
+              : `${quarantine} still exists after worktree remove`,
+        }
+      }
+      return { ok: true }
     }
-    const verifyListing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
-    const stillPresent = verifyListing.ok && parseWorktrees(verifyListing.stdout).some((worktree) => path.resolve(worktree.path) === path.resolve(quarantine))
-    if (!verifyListing.ok || stillPresent) {
-      results.push({ ...base, action: 'error', reason: 'worktree-remove-unverified', evidence })
-      continue
-    }
-    const branchSafety = await deleteLocalBranchSafely(realRepo, parseWorktrees(verifyListing.stdout), item.branchRef, item.head, defaultInfo.ref, evidence)
+    const branchSafety = await deleteLocalBranchSafely(realRepo, headLockRecords, item.branchRef, item.head, defaultInfo.ref, defaultHead, evidence, quarantine, beforeCommit)
     if (!branchSafety.ok) {
+      if (branchSafety.reason.startsWith('worktree-')) registrationFenceFailure = true
       results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
       continue
     }
     results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
   }
+  if (registrationFenceFailure) return results
   const worktreeBranchRefs = new Set(worktrees.map((item) => item.branchRef).filter(Boolean))
-  results.push(...await cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, mergedPrEvidence))
+  results.push(...await cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, mergedPrEvidence, initialBranchHeads))
   return results
+  } finally {
+    const released = await initialFences.release()
+    if (!released.ok) results.push({ repo: realRepo, action: 'error', reason: 'worktree-registration-fence-release-failed', detail: released.error })
+  }
 }
 
 function listLocalBranches(repo) {
@@ -1304,32 +1837,44 @@ function hasUnattachedLocalBranches(repo, worktrees) {
 }
 
 // Local branches that are not checked out in any worktree follow the same merge policy as
-// worktree candidates: the tip is an ancestor of the default branch, or it exactly matches the
-// head of a merged GitHub PR whose merge commit is reachable from the default branch.
-// Branches that were attached to a worktree at the start of this run are handled (or kept)
+// worktree candidates: the tip is an ancestor of the default branch, is an ancestor of a
+// merged GitHub PR head with a reachable merge commit, or is patch-equivalent to the default
+// branch. Branches that were attached to a worktree at the start of this run are handled (or kept)
 // by the worktree pass and are not reconsidered here.
-async function cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, mergedPrEvidence) {
-  const results = []
+async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explicitDefaultBranch: any, defaultInfo: any, defaultHead: any, worktreeBranchRefs: any, mergedPrEvidence: any, initialBranchHeads: any) {
+  const results: any[] = []
   const listed = listLocalBranches(realRepo)
   if (!listed.ok) return [{ repo: realRepo, action: 'error', reason: 'branch-list-failed', detail: listed.error }]
   const defaultLocalRef = `refs/heads/${defaultInfo.name}`
   for (const { ref, oid } of listed.branches) {
     if (ref === defaultLocalRef || worktreeBranchRefs.has(ref)) continue
     const base = { repo: realRepo, target: 'branch', branch: ref.slice('refs/heads/'.length), head: oid }
+    if (!initialBranchHeads.has(ref)) {
+      results.push({ ...base, action: 'skip', reason: 'branch-created-during-cleanup' })
+      continue
+    }
+    if (initialBranchHeads.get(ref) !== oid) {
+      results.push({ ...base, action: 'error', reason: 'branch-head-changed-during-cleanup', detail: `${ref} changed from ${initialBranchHeads.get(ref)} to ${oid}` })
+      continue
+    }
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', oid, defaultInfo.ref]).ok
     let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
     if (!evidence) {
-      const pr = mergedPrEvidence(base.branch, oid)
-      // Without merge evidence the branch is kept. Unattached branches are often local work or
-      // live in non-GitHub repositories, so an unavailable PR lookup is not reported as an error.
-      if (!pr.ok) {
-        results.push({ ...base, action: 'skip', reason: 'not-merged', merge_evidence_error: { code: pr.code, detail: pr.error, repository: pr.repository } })
+      const resolved = resolveMergeEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, mergedPrEvidence)
+      if (!resolved.ok) {
+        if (resolved.code === 'patch-equivalence-query-failed') {
+          results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
+        } else {
+          // Without merge evidence the branch is kept. Unattached branches are often local work or
+          // live in non-GitHub repositories, so an unavailable PR lookup is not reported as an error.
+          results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found', merge_evidence_error: { code: resolved.code, detail: resolved.error, repository: resolved.repository } })
+        }
         continue
       }
-      if (pr.match) evidence = { method: 'github-merge-commit', pr: pr.match.url, number: pr.match.number, merged_at: pr.match.mergedAt, merge_commit: pr.mergeCommit, default_ref: defaultInfo.ref, default_head: defaultHead }
+      evidence = resolved.evidence
     }
     if (!evidence) {
-      results.push({ ...base, action: 'skip', reason: 'not-merged' })
+      results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
       continue
     }
     const refBeforeDelete = git(realRepo, ['rev-parse', '--verify', ref])
@@ -1347,7 +1892,7 @@ async function cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultB
       results.push({ ...base, action: 'error', reason: remoteBeforeDelete.ok ? 'remote-default-changed-before-delete' : remoteBeforeDelete.code, detail: remoteBeforeDelete.ok ? `${remoteBeforeDelete.oid} != ${defaultHead}` : remoteBeforeDelete.error, evidence })
       continue
     }
-    const evidenceError = mergeEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence)
+    const evidenceError = mergeEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence, defaultHead)
     if (evidenceError) {
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-before-delete', detail: evidenceError, evidence })
       continue
@@ -1361,7 +1906,7 @@ async function cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultB
       results.push({ ...base, action: 'error', reason: 'worktree-list-before-branch-delete-failed', detail: commandDiagnostic('git', ['-C', realRepo, 'worktree', 'list', '--porcelain', '-z'], listing), evidence })
       continue
     }
-    const branchSafety = await deleteLocalBranchSafely(realRepo, parseWorktrees(listing.stdout), ref, oid, defaultInfo.ref, evidence)
+    const branchSafety = await deleteLocalBranchSafely(realRepo, parseWorktrees(listing.stdout), ref, oid, defaultInfo.ref, defaultHead, evidence)
     if (!branchSafety.ok) {
       results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
       continue
@@ -1399,13 +1944,15 @@ function cronNextStep(item) {
     return '検出された変更内容を確認し、不要なキャッシュや生成物はリポジトリ外へ移動または削除し、必要な変更はcommitまたは退避して、worktreeをcleanにしてから再実行してください'
   }
   if (item.reason === 'dirty') return '変更内容を確認し、必要ならcommitまたはstashしてから再実行してください'
+  if (item.reason === 'branch-created-during-cleanup') return 'cleanup中に作成されたbranchのため削除せず保持しました。現在のworktree/branch状態を確認してから再実行してください'
+  if (item.reason === 'worktree-remove-failed') return 'quarantine worktreeのregistration lockを保持したまま原因を確認し、対象pathとbranchを再検証してから手動復旧してください'
   if (item.reason === 'locked') return 'worktreeの利用状況を確認し、不要なlockを解除してから再実行してください'
   if (item.action === 'error') return '原因を確認してから再実行してください'
   return null
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'default-branch-dirty', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const importantReasons = new Set(['empty-repository', 'prunable', 'default-branch-dirty', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || item.severity === 'warn' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
   const lines = ['## merged worktree cleanup']
