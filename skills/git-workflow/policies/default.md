@@ -11,6 +11,7 @@ source codeだけでなく、後でcommit/review対象になるdocsや設計書�
 - primary/root checkoutで変更作業を始める場合は、repository rootの `.worktree/<task>` に専用worktreeを作る。
 - root checkoutをfeature/fix/refactor/choreの継続作業場所にしない。
 - test/lint/build/commitは作業worktree内で行う。
+- file edit toolの`path`には専用worktreeの絶対pathを使い、root checkoutの同名pathへ誤適用しない。複数worktreeがある場合は編集前後に`git -C <worktree> rev-parse --show-toplevel`とstatusを確認する。
 - root checkoutへfeature変更を残したまま完了扱いにしない。
 
 runtime/harnessが独自pathでlinked worktreeを用意した場合はpath namingよりGit metadataを優先し、既存linked worktreeをそのまま使います。
@@ -22,6 +23,8 @@ runtime/harnessが独自pathでlinked worktreeを用意した場合はpath namin
 - `feature/<short-name>`
 - `fix/<short-name>`
 - `chore/<short-name>`
+- `verify/<short-name>`
+- `release/<short-name>`
 
 detached HEADのままcommit/rebase/pushしません。
 
