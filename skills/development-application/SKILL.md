@@ -52,6 +52,13 @@ description: 'アプリケーションの作成/開発時に参照する全般�
 - **モノレポで package 間の設定・utility を共通化する設計をデフォルトにしない**。context が異なる package は一見同型でも分離を優先する（`tsconfig.base` のような共通化は、後から差分が出たときに全 package を巻き込む）。logger や fetcher のような「共通に見える」実装も同じで、共通化するのは変更理由が同一であることを説明できる場合だけにする
 - プロジェクト内の agent 向け knowledge（規約・手順のドキュメント）は、特定の agent ツールに依存しないツール中立な単一実体として置く。ツールごとにディレクトリを複製しない（実体は1つ、各ツールからは薄いポインタで参照する）
 
+## Generated Artifacts and Toolchain Boundaries
+
+- generated output、依存、build cacheは専用worktree内で再生成し、root checkoutや別worktreeの成果物を暗黙にコピーして検証を通さない。既存artifactとの比較が必要な場合も、同一base revisionとの一致を確認した参照用に限定する
+- generated outputが不足している場合は、canonicalな生成入口・生成元・依存ツールを確認し、生成前提の不足、toolchain不備、コード不具合を分離して記録する。既存生成物を暫定的な成功根拠にしない
+- workspace間に生成・build・testの依存順序がある場合は、実行順序を明示し、生成元workspaceを先に実行する。並列実行で生成前提を壊す場合は並列化しない
+- 最終build後は、生成物が検証したsourceと一致すること、tracked/generated artifactのstage状態とunstaged差分を確認する。build・生成・検証・commitの境界を混同しない
+
 ## Telemetry and Privacy Contract
 
 - user-facingのtelemetry/privacy説明を変更する場合は、表示文言を実装されたevent schemaへイベント単位で照合する。各eventの許可parameter、値の意味、送信条件を一覧化し、UIの説明が別eventのparameterまで送信するように読めないことを確認する
