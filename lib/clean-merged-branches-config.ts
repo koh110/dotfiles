@@ -1,7 +1,7 @@
 import path from 'node:path'
 import process from 'node:process'
 
-export function loadCleanMergedWorktreesConfig() {
+export function loadCleanMergedBranchesConfig() {
   const configuredRoot = process.env.GIT_REPOSITORIES_ROOT || process.env.HERMES_DEV_ROOT || (process.env.HOME ? path.join(process.env.HOME, 'dev') : null)
   return {
     configuredRoot,
