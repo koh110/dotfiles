@@ -9,6 +9,7 @@ description: 'TRIGGER when: git repository で状態確認、branch 作成、差
 - repository root checkout を feature / fix / refactor / chore の継続的な作業場所として利用しない
 - この skill における「コード変更」は、ソースコードに限らず、`docs/` 配下の設計ドキュメントなど、後で commit や review の対象になりうる成果物の作成・編集を含む。「ドキュメントだけだから root checkout のままでよい」とは判断しない
 - コード変更を伴う作業では、現在地が linked worktree ならその worktree を再利用し、root checkout なら専用 worktree を作成する
+- **新しく作る worktree は、用途を問わず必ず local branch を付ける。** 編集、test、release preflight、post-merge 検証、read-only review のいずれでも `--detach`、raw SHA 単独、remote-tracking ref 単独の指定で detached HEAD を作らない
 - linked worktree 内で新しい worktree を入れ子に作成しない
 - `git status`, `git diff`, branch 名を確認せずに commit / rebase / push / cleanup を行わない
 - destructive な git 操作は、対象 path と復元手段を確認してから実行する
@@ -38,11 +39,13 @@ git worktree list
   - `feature/<short-name>`
   - `fix/<short-name>`
   - `chore/<short-name>`
+  - `verify/<short-name>`
+  - `release/<short-name>`
 - branch を切る前に現在 branch と working tree の状態を確認する
 - dirty な root checkout を、そのまま正規の作業場所だとみなさない
-- linked worktree が detached HEAD の場合、変更前に専用 branch を作ることを原則とする
-- 利用中の agent やツールが detached HEAD のまま編集を開始する場合も、最初の commit より前に専用 branch を作る
-- detached HEAD のまま commit / rebase / push を行わない
+- linked worktree が detached HEAD の場合、`git switch -c <branch>` 等で専用 branch を作るまで編集・検証を開始しない
+- 利用中の agent やツールが detached HEAD の worktree を用意した場合も同じ扱いとし、branch を付与してから作業を開始する
+- detached HEAD のまま作業・検証・commit / rebase / push を行わない
 
 ## Worktree Guidelines
 
@@ -51,7 +54,10 @@ git worktree list
 - worktree 名と branch 名は作業内容に揃える
   - 例: `.worktree/feature-api-cache` = `feature/api-cache`
   - 例: `.worktree/fix-login-timeout` = `fix/login-timeout`
+- worktree を新規作成するときは、未作成の branch なら `git worktree add <path> -b <branch> <start-point>`、既存の local branch なら `git worktree add <path> <branch>` を使う。どちらも local branch を持つ worktreeにし、commit SHA や remote-tracking refを検証したい場合も、`verify/<name>`・`release/<name>` 等の一時 branchを作ってから checkoutする
+- 作成直後に `git -C <path> branch --show-current` と `git -C <path> symbolic-ref --short HEAD` が期待する branch を返すことを確認し、確認できなければその worktree で作業を開始しない
 - test / lint / build / commit は作業中の worktree 内で実行する
+- file edit toolの`path`には専用worktreeの絶対pathを使い、root checkoutの同名pathへ誤適用しない。複数worktreeがある場合は編集前後に`git -C <worktree> rev-parse --show-toplevel`とstatusを確認する
 - root checkout の `git status` に `.worktree/` が出る場合は、放置せず local exclude などで隠す
 - 誤って root checkout で変更を始めた場合も、そのまま続けず worktree へ移植して root checkout を戻す
 
@@ -61,7 +67,7 @@ git worktree list
 - **harness(Claude Code)が事前に用意した worktree(`.claude/worktrees/<name>/` 等)も、手動・agent作成の worktree と同様に既存の linked worktree として扱う**。「規約に沿っていないのでは」と疑って独自の `.worktree/` を新設しない。harness提供のworktreeか手動作成かで扱いを変える必要はなく、`git_dir != common_dir` である以上は現在の worktree をそのまま再利用する
 - 現在の worktree の path、branch、status を確認し、そのタスク専用として安全に利用できることを確認する
 - 既に適切な専用 branch にいる場合は、その branch と worktree をそのまま使う
-- detached HEAD で未変更なら、原則として編集前に専用 branch を作る
+- detached HEAD で未変更なら、編集前に専用 branch を作る
 - detached HEAD で既に変更がある場合は変更を保持したまま専用 branch を作り、status と diff が維持されていることを確認する
 
 ```bash
@@ -104,6 +110,7 @@ git worktree add .worktree/feature-short-name -b feature/short-name "$target_oid
 cd .worktree/feature-short-name
 git rev-parse --show-toplevel
 git branch --show-current
+git symbolic-ref --short HEAD
 ```
 
 ## Root Checkout Recovery Guidelines
@@ -286,7 +293,8 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - dirty な root checkout を安全な作業場所だと誤認する
 - `.worktree/` が存在するだけで、既に専用 worktree 内にいると思い込む
 - linked worktree 内でさらに `.worktree/` を作り、worktree を入れ子にする
-- agent やツールが作成した linked worktree の detached HEAD を見落としたまま commit する
+- agent やツールが作成した linked worktree の detached HEAD を見落としたまま作業・検証・commit する
+- release/post-merge の read-only 検証だからと `git worktree add --detach <path> <sha>` を使い、後で孤立した detached worktree を残す
 - root checkout にいるのに `.worktree/` を optional な慣習扱いして feature 作業を続ける
 - tracked file だけ戻して untracked file を置き去りにする
 - `git diff --cached` を見ずに commit する
@@ -301,7 +309,8 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - `git_dir != common_dir` なら現在の linked worktree を再利用し、新しい worktree を作成しないこと
 - `.worktree/` 以下で起動した場合、既存の linked worktree を再利用し、共有 `.git` へ書き込む `git worktree add` を試行しないこと
 - `git_dir == common_dir` でコード変更を行うなら、root checkout ではなく `.worktree/` 配下の専用 worktree を作成して移動すること
-- detached HEAD のまま commit / rebase / push しないこと
+- detached HEAD のまま作業・検証・commit / rebase / push しないこと。新規 worktree 作成時に detached HEAD を許容する例外は設けないこと
+- 新規 worktree は必ず local branch付きで作成する。未作成の branchは`-b <branch>`、既存の local branchはbranch refを指定し、作成直後に`branch --show-current`と`symbolic-ref --short HEAD`をread-backすること
 - コード変更を伴う作業では、専用 worktree 内にいることと適切な専用 branch にいることを完了前に必ず再確認すること
 
 - commit / push を行う場合、完了報告前に `git diff --cached` と対象 branch / commit SHA を必ず確認すること

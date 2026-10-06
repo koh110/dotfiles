@@ -69,6 +69,13 @@ Dockerfile内でnpmを利用する場合は、`npm install` の前に `.npmrc` �
 RUN npm install --min-release-age=7
 ```
 
+## Linked Worktree and npm Workspace Verification
+
+- linked worktreeには`node_modules`が伴わないことがある。npm script、`npx`、wrangler等を実行する前に`node_modules/.bin`または対象binaryの実在を確認する
+- 依存が不足している場合は、専用worktreeのrepository rootから、同worktreeにあるroot lockfile/workspacesを使って`npm ci`（必要なら`--ignore-scripts`）等を実行する。root checkoutや別worktreeの`node_modules`をコピー・暗黙参照しない
+- root lockfile + workspaces構成では、workspace package directory内で無計画な`npm ci`/`npm install`を実行してnested `node_modules`やlockfileを作らない。package managerの解決経路とlockfileの所在を先に確認する
+- build・生成・testにworkspace間の依存順序がある場合は、生成元を先に実行し、並列実行で前提を壊さない
+
 ## package.json Guidelines
 
 - はじめてpackage.jsonを作成する場合は下記のみで構成する
