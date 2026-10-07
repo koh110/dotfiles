@@ -1,7 +1,21 @@
 ---
 name: git-workflow
-description: 'TRIGGER when: git repository で状態確認、branch 作成、差分確認、commit、rebase、push、worktree 作成、cleanup などの git 操作全般を行うとき、またはその repository 配下でソースコードやドキュメント(設計docなど、後で commit や review の対象になりうる成果物)を新規作成・編集するとき。既存の linked worktree を再利用し、root checkout にいる場合だけ repository root 配下の `.worktree/` に専用 worktree を作成して、編集・test・lint・build・commit を完結させる。'
+description: 'TRIGGER when: Git または GitHub の repository delivery で状態確認、branch/worktree 作成、差分確認、test、commit、push、PR 作成・更新、CI確認、rebase、merge、cleanup などを行うとき、またはその repository 配下で後に commit/review 対象となる成果物を編集するとき。GitとGitHub PRを一つのcandidate・base・head・SHAの状態機械として扱い、既存linked worktreeを再利用し、root checkoutなら専用worktreeで作業する。'
 ---
+
+## Scope and Operation Model
+
+このskillは、Git操作とGitHub PR操作を別々のworkflowとしてではなく、一つのrepository deliveryとして扱う。`candidate`、`base`、`head`、worktree、commit SHAの同一性を、branch作成からPR作成・更新、CI、merge、cleanupまで引き継ぐ。
+
+対象となる操作:
+
+- repository / worktree / branch / target base の確定
+- 編集、test、lint、build、差分・staged内容の確認
+- commit、push、rebase、conflict処理、remote refのread-back
+- GitHub PRの作成・更新、target確認、body、CI/check、mergeabilityの確認
+- 明示承認後のmergeと、merge後の安全なcleanup
+
+GitHub固有の`gh`/APIコマンド、PR body、CI troubleshootingの詳細は [references/github-pr-workflow.md](references/github-pr-workflow.md) に置く。`github-pr-workflow`を別の完全な手順として併用せず、このskillを一つの操作入口として扱う。`github-code-review`、`github-repo-management`、`github-delivery-verification`などは、review、repository設定、issue/projectを含むdelivery closureの専門workflowとして必要時だけ追加する。
 
 ## General Guidelines
 
@@ -156,6 +170,21 @@ git status --short  # まだ原本を保持していることを確認
 
 実装後は、作業開始時に確定したPR target/base branchとの差分を再確認し、目的外の変更を除去する。依存関係を実証できない関連機能はスコープ外として扱う。
 
+## Integrated GitHub PR Lifecycle
+
+GitHub PRを伴う場合は、次の順序を一つのcandidate lifecycleとして実行する。各段階で対象が変わった場合は、以前のverificationを再利用せず、その段階からread-backとgateをやり直す。
+
+1. **Target preflight** — repository、remote、worktree、現在branch、PRの`owner/repo#number`（既存PRの場合）、base branch、base OID、head branchを固定する。`main`/`master`やcwdだけから推測しない。
+2. **Candidate preparation** — baseのexact OIDから専用worktree/branchを用意し、目的、受け入れ条件、変更pathを固定する。既存PRの続きを行う場合は、そのPRとhead branchをタスク全体の制約にする。
+3. **Local verification and commit** — test、lint、build、`git diff --check`、staged diff、commit SHAを確認する。生成物がある場合は最終生成後にstageし直し、意図しない差分がないことを確認する。
+4. **Remote delivery** — push前にrepository visibility、branch、期待するHEAD SHA、forceの要否を確認する。push後にlocal HEAD、remote branch、PR `headRefOid`をread-backし、同じSHAであることを確認する。
+5. **PR state** — 新規PRの作成、既存PRのbody/metadata更新、base/head/changed filesのread-backを行う。PR作成成功だけをdelivery完了とみなさない。
+6. **Remote checks** — `gh pr checks`、status rollup、対象workflow/job/stepを確認する。`pending`、`skipping`、`no checks reported`、runner待ち、API取得不能はPASSに変換しない。CI failureの修正では、失敗のhead SHAを固定して原因を分類し、修正後にlocal gate・commit・push・remote read-backを繰り返す。
+7. **Merge boundary** — PR作成、review PASS、CI PASS、release/deploy依頼はmerge承認ではない。明示的に指定されたPRのmerge承認がある場合だけ、mutation直前に対象を再読込してmergeする。merge後は正確なmerge SHAとPR stateをread-backする。
+8. **Cleanup** — merge確認後のworktree、local branch、remote branch、起動中サービスのcleanupは別々の安全gateで扱う。未使用・clean・merge evidenceを削除直前にも確認し、remote branch削除は明示依頼がない限り行わない。
+
+詳細なGitHub command、PR body rewrite、target harness、CI failure pattern、merge API fallbackは [references/github-pr-workflow.md](references/github-pr-workflow.md) を参照する。
+
 ## Portable Change-Target Gate
 
 repositoryやagentをまたいで変更を展開する場合、Hermes/Codex等のagent固有機能や、ロード済みskillの記憶だけでtargetを決めない。リポジトリ非依存の`skills/change-target-gate/scripts/change-target-gate.mjs`を実行し、manifestで宣言したrepository・base・artifact・pathだけを変更対象にする。
@@ -290,6 +319,14 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 
 ## Common Pitfalls
 
+- Git操作とGitHub PR操作を別々のworkflowとして扱い、base、head、candidate、SHAのidentityを引き継がない
+- `github-pr-workflow`の古い完全手順を別に適用し、`git-workflow`のworktree・exact target・commit/push gateと競合させる
+- `git checkout main && git pull`をPR作業の開始手順にし、root checkoutへ変更を残す
+- PR作成成功、branch push成功、review PASS、CI PASSのいずれか一つだけでdelivery完了またはmerge承認と判断する
+- PR番号・branch名・cwdだけからrepository targetを推測する
+- `pending`、`skipping`、`no checks reported`、runner待ち、API取得不能をCI PASSへ読み替える
+- CI failureを原因確認せずアプリケーションコードの失敗とみなす
+- PR bodyやGitHub API payloadをshell inline文字列へ詰め込み、Markdown・backtick・改行を壊す
 - dirty な root checkout を安全な作業場所だと誤認する
 - `.worktree/` が存在するだけで、既に専用 worktree 内にいると思い込む
 - linked worktree 内でさらに `.worktree/` を作り、worktree を入れ子にする
@@ -304,6 +341,12 @@ git -C .worktree/feature-short-name ls-files --others --ignored --exclude-standa
 - ドキュメント作成のみだから worktree は不要と判断し、root checkout で作業する(実測: 別々の session が並行して root checkout に設計ドキュメントをそれぞれ untracked で作成し、各 session の stop 時 review が root の diff 全体を対象にしたため、他 session の未 commit 変更まで自分のレビュー対象に混入した)
 
 ## Mandatory Skill Enforcement
+
+- GitHub PRを伴う作業では、このskillをGit操作からPR cleanupまでの単一workflowとして適用し、必要に応じて `references/github-pr-workflow.md` を読むこと
+- `github-pr-workflow`を独立したbranch/commit/push手順として二重適用しないこと
+- PR作成・更新・comment・mergeなどの外部mutation前に、exact repository/PR/base/head targetを再確認すること
+- PR作成、push、review PASS、CI PASSをmerge承認とみなさないこと。mergeは指定されたPRへの明示承認後だけ実行すること
+- PR mutation後は、対象URL、repository、base/head branch、head SHA、state、changed files、checksをread-backし、未確認状態を成功扱いにしないこと
 
 - この skill が load されたら、git 操作を始める前に repository root / Git dir / common Git dir / branch / worktree / working tree 状態を必ず確認すること
 - `git_dir != common_dir` なら現在の linked worktree を再利用し、新しい worktree を作成しないこと
