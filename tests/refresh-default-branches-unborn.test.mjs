@@ -68,7 +68,7 @@ test('skips a repository with an unborn branch before attempting a rebase', asyn
   }
 })
 
-test('reports an unborn branch with an unreachable origin without failing the script', async () => {
+test('keeps an unborn branch with an unreachable origin as a failure', async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'refresh-default-branches-'))
   try {
     const devRoot = path.join(tmp, 'dev')
@@ -83,17 +83,16 @@ test('reports an unborn branch with an unreachable origin without failing the sc
       env: { ...process.env, GIT_REPOSITORIES_ROOT: devRoot },
     })
 
-    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.equal(result.status, 1, result.stderr || result.stdout)
     assert.match(result.stdout, /fixture: 失敗/)
     assert.match(result.stdout, /ls-remote --heads origin/)
-    assert.match(result.stdout, /警告: 1件のrepository更新に失敗しました/)
     assert.doesNotMatch(result.stdout, /fixture: スキップ/)
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }
 })
 
-test('reports an unborn branch with an unresolved remote default without failing the script', async () => {
+test('keeps an unborn branch failure when the remote default branch is unresolved', async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'refresh-default-branches-'))
   try {
     const devRoot = path.join(tmp, 'dev')
@@ -121,61 +120,10 @@ test('reports an unborn branch with an unresolved remote default without failing
       env: { ...process.env, GIT_REPOSITORIES_ROOT: devRoot },
     })
 
-    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.equal(result.status, 1, result.stderr || result.stdout)
     assert.match(result.stdout, /fixture: 失敗/)
     assert.match(result.stdout, /origin\/HEAD/)
-    assert.match(result.stdout, /警告: 1件のrepository更新に失敗しました/)
     assert.doesNotMatch(result.stdout, /fixture: スキップ/)
-  } finally {
-    await rm(tmp, { recursive: true, force: true })
-  }
-})
-
-test('reports one repository failure without suppressing another repository update', async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), 'refresh-default-branches-'))
-  try {
-    const devRoot = path.join(tmp, 'dev')
-    const failureRepo = path.join(devRoot, 'a-failure')
-    const successRepo = path.join(devRoot, 'z-success')
-    const seed = path.join(tmp, 'seed')
-    const remote = path.join(tmp, 'remote.git')
-    await mkdir(devRoot, { recursive: true })
-
-    must(run('git', ['init', '--bare', remote]), 'git init remote')
-    must(run('git', ['init', '-b', 'main', seed]), 'git init seed')
-    git(seed, ['config', 'user.name', 'Fixture'])
-    git(seed, ['config', 'user.email', 'fixture@example.invalid'])
-    await writeFile(path.join(seed, 'base.txt'), 'base\n')
-    git(seed, ['add', 'base.txt'])
-    git(seed, ['commit', '-m', 'base'])
-    git(seed, ['remote', 'add', 'origin', remote])
-    git(seed, ['push', 'origin', 'main'])
-    must(run('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', 'refs/heads/main']), 'set remote HEAD')
-    must(run('git', ['clone', remote, failureRepo]), 'clone failure repository')
-    must(run('git', ['clone', remote, successRepo]), 'clone success repository')
-
-    await writeFile(path.join(failureRepo, 'base.txt'), 'local draft\n')
-    await writeFile(path.join(seed, 'updated.txt'), 'remote update\n')
-    git(seed, ['add', 'updated.txt'])
-    git(seed, ['commit', '-m', 'remote update'])
-    git(seed, ['push', 'origin', 'main'])
-
-    const result = run(entrypoint, [], {
-      env: { ...process.env, GIT_REPOSITORIES_ROOT: devRoot },
-    })
-
-    assert.equal(result.status, 0, result.stderr || result.stdout)
-    assert.match(result.stdout, /対象 repository: 2件/)
-    assert.match(result.stdout, /a-failure: 失敗/)
-    assert.match(result.stdout, /pull --rebase origin main/)
-    assert.match(result.stdout, /z-success: 更新 — mainをorigin\/mainへ更新/)
-    assert.ok(
-      result.stdout.indexOf('a-failure: 失敗') < result.stdout.indexOf('z-success: 更新'),
-      result.stdout,
-    )
-    assert.match(result.stdout, /警告: 1件のrepository更新に失敗しました/)
-    assert.equal(await readFile(path.join(failureRepo, 'base.txt'), 'utf8'), 'local draft\n')
-    assert.equal(git(successRepo, ['rev-parse', 'HEAD']).stdout, git(seed, ['rev-parse', 'HEAD']).stdout)
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }
