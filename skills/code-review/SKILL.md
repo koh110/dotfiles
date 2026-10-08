@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: '実装・refactoring・bugfix後やcommit/push前にreview要否を判定し、必要な場合はコード差分の独立レビュー、品質ゲート、finding判定、修正後closureを実行するときに使う。'
-version: 1.1.0
+version: 1.4.0
 license: MIT
 ---
 
@@ -36,6 +36,8 @@ license: MIT
 - 仕様書の作成・仕様固有の質問ループは`spec-drilldown`の責務
 - GitHub等の外部reviewシステムへの投稿は、runtime/platform固有adapterの責務
 - runtime固有adapterは、このskillのseverity、Verdict、finding adjudicationを変更してはならない
+- Review Charter、finding scope、Minor/Suggestionの採否、review-loop budgetはこのskillのsemantic contractであり、delivery/CLI adapterへ複製・再定義しない
+- requirement grounding、boundary判定、reviewerが追加した未記載制約の採否もこのskillに統合し、別の「requirements-grounded review」skillへ分割しない
 - reviewのmandatory conditionとreviewer qualificationは外部policyが定義し、このskillへmodel名や固定thresholdとして埋め込まない
 
 ## Review Gate
@@ -54,6 +56,14 @@ runtimeまたはpolicyがreviewer qualificationを要求する場合、その条
 6. 変更種別に応じたdomain-specific verificationがある場合は、現在の実行contextでloadされているskillとrepositoryのskill source of truthから対応する手順を解決し、仕様・acceptance criteriaに従って実装者が実行した結果、またはN/A理由を`Reviewer Inputs`へ含める。該当するverificationの集合は実装者の申告だけでなく対象diffの変更種別からreviewerが独立に導出し、実行結果・N/A理由・evidenceの整合を確認する。適用対象の未実行や根拠なしをPASS扱いしない
 7. 対象revisionとVerdictを記録する。policyがreviewer identity/capability evidenceを要求する場合はadapterから取得して併記する
 8. review後に変更があれば、以前のtest/review evidenceを無効化し、最終revisionに対して全gateを再実行する
+
+## Pre-commit closure and correction loop
+
+このskillは、独立reviewだけでなく、review前後のpre-commit quality gateも一つのコードレビュー責務として扱う。static security scan、baselineとの差分を含むtest/lint/typecheck/build、`git diff --check`、domain-specific verification、独立Verdictを同じfinal candidateへ結び付ける。baseline既存のfailure、環境/setup blocker、今回導入したregressionを別々に分類し、未実行のgateをPASSへ読み替えない。
+
+Blocking/Majorまたはconfirmedなsecurity/logic defectがある場合は、finding ledgerへまとめて登録し、関連findingを一つのbounded patchで修正する。修正担当は報告されたfindingだけを直し、rename、refactoring、追加feature、一般的なhardeningを同時に始めない。修正後はaffected focused gate、complete native gate、final snapshot、fresh closure reviewを順に再実行する。
+
+修正→再検証のcycleは1 deliveryにつき最大2回とする。2回目で解消しない場合は、残件と必要なscope/requirements decisionをユーザーへ戻し、同じ広いauto-fix/review loopを継続しない。Minor/Suggestionだけを理由にauto-fixを起動したり、実装範囲を拡張したりしない。delegate、CLI、GitHub adapterはこの手順を実行してよいが、severity、scope、cycle budgetを独自定義しない。
 
 ## Reviewer Inputs
 
@@ -113,6 +123,33 @@ reviewerの指摘をそのまま採用しない。canonical requirementの優先
 
 指摘ごとに、該当要件、file/line、再現条件、判定（confirmed / invalid / user-decision / non-blocking）を記録する。明示要件にないnormalization、threshold、domain制約をreviewerが追加した場合は、要件に照らして採否を判断する。
 
+## Requirement-grounded finding adjudication
+
+要件の境界・literal・normalizationを判定するレビューも、独立した別skillではなく、このコードレビュー契約の一部として扱う。採用する根拠の優先順位は次の通り:
+
+1. ユーザー要求またはcanonical issue
+2. explicit acceptance criteriaと境界例
+3. schema / upstream API contract
+4. 要件を正しく表現している既存test
+5. 実装上の慣習・reviewerの解釈
+
+各findingでは、最上位の要件を引用し、`confirmed defect`、`unstated-assumption`、`ambiguous requirement`、`non-blocking suggestion`のいずれかに分類する。inclusive threshold、exact literal、invalid input、normalizationについては、境界値・隣接値・無効値・正規化variantを確認する。要件にないtrim、case folding、numeric range、domain制約を追加しない。高位の根拠が互いに矛盾する場合は、都合のよい解釈で実装せずユーザー判断へ戻す。
+
+confirmed defectは、可能ならRED→GREENで最小修正する。false positiveやunstated assumptionは、重要な契約であれば根拠付きのtestまたはfinding ledgerへ記録し、reviewerの提案だけを理由にscopeを広げない。最終のsource、test、spec、fixture変更後は、古いreview evidenceを破棄して全gateとfresh closure reviewを最終candidateへ適用する。
+
+## Review-loop budget and scope freeze
+
+レビューを探索的lintループにしない。初回レビュー前に、次のReview Charterを固定する:
+
+- ユーザーの目的とcanonical acceptance criteria
+- 変更してよいファイルのallowlist
+- 明示的なout-of-scope
+- Blocking/Major/Minor/Suggestionの採否方針
+
+レビュー前にacceptance criteria、static scan、focused tests、変更対象ファイルを一度確認し、レビューには最終候補全体を渡す。1回のVerdictは全指摘をまとめて分類するためのものとし、1指摘ごとに再レビューを起動しない。修正はconfirmedなBlocking/Majorと、Review Charter内のcorrectness問題に限定する。要件違反でないMinor/Suggestionは記録して受け入れてよく、それだけを理由に実装範囲を拡張しない。
+
+fresh closure reviewは1 deliveryにつき最大2回とする。1回目の結果をまとめて修正し、focused gateとfinal snapshotを作成して2回目を実行する。2回目の後もBlocking/Majorが残る場合は、残件をdecision tableにまとめてユーザーへ要件・スコープ判断を戻し、3回目を自動で開始しない。base、branch、PR、または候補revisionが変わった場合は以前のVerdictを無効化し、新しい候補でこの上限を数え直す。これにより、reviewerのMinor提案が逐次的なfeature追加や無制限のレビュー反復へ変わることを防ぐ。
+
 ## Closure Review
 
 Blocking/Majorを修正した場合:
@@ -128,6 +165,9 @@ Blocking/Majorを修正した場合:
 
 ## Completion Checklist
 
+- [ ] Review Charter（目的、受入条件、allowlist、out-of-scope、採否方針）を初回レビュー前に固定した
+- [ ] review round数が上限2回以内である
+- [ ] Minor/Suggestionだけを理由に変更範囲を拡張していない
 - [ ] 対象revisionとbaseをauthoritative metadataから確定した
 - [ ] static security scanを実行した
 - [ ] baselineとの差分を含むtest/lint/typecheck/build結果を確認した
