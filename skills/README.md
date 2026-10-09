@@ -2,6 +2,10 @@
 
 `skills/` は、複数のagent runtime・modelで再利用できるskill packageのsource of truthです。
 
+## 新規skillの配置
+
+公開可能なGit/GitHub/PR/CIなどのportableなworkflow skillを新規作成・統合するときは、最初からこのrepoの`skills/`へ作成します。profile-localなskill directoryへ一度作ってから移すstaging運用はしません。private ID・内部URL・ユーザー固有の運用を含むものは、公開用coreへ混ぜずprivate skills repositoryへ分離します。Hermesのgateway・profile・cron・configなど、本当にHermes runtimeだけが利用するskillだけを例外としてprofile-localに置きます。ユーザーが配置先を指定した場合は、そのtargetをsource of truthとして扱い、installed snapshotへ先に書き込みません。
+
 ## 1 skill = 1 portable package
 
 policy / model profile / runtime adapterが **そのskillにだけ関係するなら、同じskill directoryへ置きます**。

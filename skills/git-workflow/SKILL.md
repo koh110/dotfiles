@@ -1,6 +1,6 @@
 ---
 name: git-workflow
-description: 'Git repositoryでcontext確認、branch/worktree、commit/rebase/push、conflict、cleanupを安全に行うときに使う。'
+description: 'Git repositoryとGitHub deliveryでcontext確認、branch/worktree、commit/rebase/push、conflict、PR/CI read-back、cleanupを安全に行うときに使う。'
 ---
 
 ## Package overlays
@@ -15,7 +15,7 @@ description: 'Git repositoryでcontext確認、branch/worktree、commit/rebase/p
 
 # Git Workflow
 
-このskillはGit操作そのもののportableな安全contractを定義します。
+このskillはGit操作そのもののportableな安全contractを定義します。GitHubのIssue/Project/PR deliveryが関係する場合は、同じpackage内の`references/github-pr-workflow.md`を追加で読みます。GitHub lifecycleを別のtop-level skillへ分割せず、Gitのlocal mechanicsとremote deliveryを一つのworkflow packageとして扱います。
 
 次はこのskillの責務ではありません。
 

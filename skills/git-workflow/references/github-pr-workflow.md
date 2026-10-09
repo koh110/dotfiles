@@ -1,8 +1,29 @@
-# GitHub PR Lifecycle Reference
+# GitHub Delivery Reference
 
-このreferenceは、`git-workflow` に統合されたGitHub PR操作の詳細手順です。repository root / worktree / branch / target base / commit候補の確認は親skillが所有するため、ここでは重複して扱いません。
+このreferenceは、`git-workflow` packageに統合されたGitHub deliveryの詳細手順です。GitHub Issue/Project/PRを扱うときだけ読み、通常のlocal Git操作では読みません。Issue起点、既存PR更新、scope recoveryを別skillへ分けず、同じdelivery lifecycleのscenario gateとして扱います。
 
-PR操作はGit操作から独立した作業ではありません。親skillで確定したcandidate、base、head、worktreeを維持したまま、PRの作成・更新・CI確認・merge判断へ進みます。`github-pr-workflow`を別の完全な手順として併用し、branchやcommit手順を二重適用しないでください。
+PR操作はGit操作から独立した作業ではありません。親skillで確定したcandidate、base、head、worktreeを維持したまま、Issue/Project intake、PRの作成・更新、CI確認、merge判断へ進みます。このreferenceを別の完全な手順として併用し、branchやcommit手順を二重適用しないでください。
+
+## Delivery state model
+
+次の状態を混同しません。
+
+1. **Candidate** — intendedなtracked / untracked / generated filesが特定されている
+2. **Verified locally** — candidateに対するrepository-native verificationが完了している
+3. **Reviewed** — exact final candidateに対する独立reviewがqualified verdictを返している
+4. **Committed** — named local branch上の既知のcommitに意図した変更が入っている
+5. **Published** — remote branchがそのcommitを指している
+6. **PR verified** — PR metadataとchanged-file listがremote headと一致している
+7. **Remote CI determined** — 各checkがpass / fail / pending / skipped / absentに分類されている
+8. **Merged/deployed** — 独立した認可とread-backが必要な別状態
+
+PR作成・更新の依頼は、指定されたdelivery mutationだけを認可します。merge、auto-merge、deploy、release、Issue close、Project変更、無関係なcleanupは含みません。
+
+## Issue/Project intake and scope recovery
+
+Issue/Project起点では、本文・acceptance criteria・現在のthread・repository instructionsを読み、各criteriaをtestまたは明示的なverificationへ対応付けます。既存PRや最近のcommitをIssue番号とcomponent/symptomの複数表現で検索し、重複作業を作らないようにします。
+
+既存PR更新やscope recoveryでは、対象repository、PR state、base/head branch、開始時点のhead OID、expected pathsをfreezeします。candidateはtracked、deleted、staged、unstaged、generated、untrackedの全状態を含めて確認し、delegated summaryや成功報告だけを根拠にしません。scopeが異なる変更は、同じbranchへ混ぜずにcandidateを分離します。
 
 詳細な補助資料:
 
@@ -31,8 +52,12 @@ PR操作はGit操作から独立した作業ではありません。親skillで�
 ### PR-facing language
 
 - Follow the user-requested language and the repository convention for PR-facing text.
+- Write the PR title and body in the selected language.
 - When rewriting an existing PR body, keep the selected language consistent throughout the new body.
-- Commit messages still follow the repository convention; do not change their language merely to match the PR body.
+- Keep commit messages in the project's existing convention unless the user asks to change that too.
+- Do not change commit-message language merely to match the PR body.
+- When editing an existing PR body, preserve the selected language unless the target PR intentionally uses another language.
+- Treat this as part of PR quality, not an optional style preference.
 
 ### PR body reset rule
 
@@ -64,7 +89,7 @@ When `gh` appears to be pointing at the wrong repository context, do not assume 
 - Verify the intended repo with `gh repo view <owner>/<repo>` or by checking the remote explicitly. (`gh repo view` takes the repository as a positional argument; it does not support `-R`.)
 - Pass `--repo <owner>/<repo>` (or `-R <owner>/<repo>` where that specific `gh` subcommand supports it) to `gh pr create`, `gh pr edit`, `gh pr view`, and similar commands when the repo context is ambiguous or a sibling repo/default branch is involved.
 - Treat "No commits between <base> and <branch>" or a surprising default repo name as a signal to re-run the command with an explicit repo target.
-- For broader repository operations such as cloning, remote setup, branch/worktree management, or moving between checkouts, prefer `github-repo-management`.
+- For broader repository operations such as cloning, remote setup, branch/worktree management, or moving between checkouts, follow the parent `git-workflow` procedures rather than introducing another lifecycle skill.
 
 ### Multi-PR / multi-repo safety harness
 
@@ -102,16 +127,6 @@ Treat "branch pushed successfully" and "PR now points at that commit" as separat
 For PR title and body, follow the user-requested language and the repository convention. Apply the same rule when creating a PR or rewriting its body.
 
 If `gh pr create` reports missing head/base SHAs or says there are no commits, or if gh seems to resolve the wrong repository, specify the repository and head branch explicitly. See the troubleshooting section below.
-
-### PR-facing language
-
-For PR-facing text, follow the user-requested language and the repository convention.
-
-- Write the PR title and body in the selected language.
-- Keep commit messages in the project's existing convention unless the user asks to change that too.
-- When editing an existing PR body, preserve the selected language unless the target PR intentionally uses another language.
-
-Treat this as part of PR quality, not an optional style preference.
 
 **With gh:**
 
