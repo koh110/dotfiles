@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -93,6 +93,83 @@ function mergeRemoteWithoutRefreshingLocalDefault(repo) {
   return { base }
 }
 
+async function installProcessInjectionTools(fixtureRoot, candidate, stage, failRestore = false) {
+  const fakeBin = path.join(fixtureRoot, 'bin')
+  const pidFile = path.join(fixtureRoot, 'injected-process.pid')
+  const fakeDocker = path.join(fakeBin, 'docker')
+  const fakeGit = path.join(fakeBin, 'git')
+  const realGit = run('which', ['git']).stdout.trim()
+  const processExecutable = process.execPath
+  await mkdir(fakeBin, { recursive: true })
+  await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+  await writeFile(fakeGit, `#!/bin/sh
+if [ "$CLEANUP_TEST_FAIL_RESTORE" = "1" ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "move" ] && [ "$8" = "$CLEANUP_TEST_CANDIDATE" ]; then
+  case "$7" in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*) exit 0 ;; esac
+fi
+start_process() {
+  [ -e "$CLEANUP_TEST_PID_FILE" ] && return
+  target=$1
+  ( cd "$target" || exit 99; exec "$CLEANUP_TEST_PROCESS_EXECUTABLE" -e 'setInterval(() => {}, 1000)' ) >/dev/null 2>&1 &
+  process_pid=$!
+  printf '%s\\n' "$process_pid" > "$CLEANUP_TEST_PID_FILE"
+  attempt=0
+  while [ ! -r "/proc/$process_pid/status" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.01
+    attempt=$((attempt + 1))
+  done
+}
+if [ "$CLEANUP_TEST_STAGE" = "status-failure" ] && [ "$1" = "-C" ] && [ "$3" = "-c" ] && [ "$5" = "status" ]; then
+  case "$2" in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*) printf "%s\\n" "injected status failure" >&2; exit 42 ;; esac
+fi
+if [ "$CLEANUP_TEST_STAGE" = "before-remove" ] && [ "$1" = "-C" ] && [ "$3" = "update-ref" ] && [ "$4" = "--stdin" ]; then
+  for quarantine in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*; do
+    [ -d "$quarantine" ] || continue
+    start_process "$quarantine"
+    break
+  done
+fi
+"$CLEANUP_TEST_REAL_GIT" "$@"
+result=$?
+if [ "$result" -ne 0 ]; then exit "$result"; fi
+if [ "$CLEANUP_TEST_STAGE" = "after-quarantine" ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "move" ] && [ "$7" = "$CLEANUP_TEST_CANDIDATE" ]; then
+  case "$8" in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*) start_process "$8" ;; esac
+fi
+if [ "$CLEANUP_TEST_STAGE" = "before-clean" ] && [ "$1" = "-C" ] && [ "$3" = "ls-files" ]; then
+  case "$2" in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*) start_process "$2" ;; esac
+fi
+exit "$result"
+`)
+  await chmod(fakeDocker, 0o755)
+  await chmod(fakeGit, 0o755)
+  return {
+    pidFile,
+    options: {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CLEANUP_TEST_CANDIDATE: candidate,
+        CLEANUP_TEST_FAIL_RESTORE: failRestore ? '1' : '0',
+        CLEANUP_TEST_PID_FILE: pidFile,
+        CLEANUP_TEST_REAL_GIT: realGit,
+        CLEANUP_TEST_ROOT: fixtureRoot,
+        CLEANUP_TEST_PROCESS_EXECUTABLE: processExecutable,
+        CLEANUP_TEST_STAGE: stage,
+      },
+    },
+  }
+}
+
+async function stopInjectedProcess(pidFile) {
+  const pidText = await readFile(pidFile, 'utf8').catch(() => '')
+  const pid = Number(pidText.trim())
+  if (!Number.isInteger(pid) || pid <= 0) return
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error
+  }
+}
+
 test('removes a clean merged worktree and its local branch in apply mode', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-merged-'))
   try {
@@ -122,6 +199,391 @@ test('removes a clean merged worktree and its local branch in apply mode', async
     assert.equal(lockExists, false)
     const headPath = path.resolve(repo, git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'HEAD']).stdout.trim())
     await assert.rejects(access(`${headPath}.lock`))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('cleans a clean merged linked worktree outside the repository when it is under the managed root', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-managed-root-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const externalWorktree = path.join(fixtureRoot, 'repo-feature')
+    git(repo, ['worktree', 'move', worktree, externalWorktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const options = {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    }
+
+    const dryRun = run(entrypoint, ['--root', fixtureRoot, '--json'], options)
+    assert.equal(dryRun.status, 0, dryRun.stderr || dryRun.stdout || dryRun.error || 'process did not start')
+    const drySummary = JSON.parse(dryRun.stdout)
+    assert.equal(drySummary.repositories_checked, 1)
+    assert.equal(drySummary.would_delete, 1)
+    assert.equal(drySummary.results[0].action, 'would-delete')
+    assert.equal(drySummary.results[0].path, externalWorktree)
+    assert.equal(existsSync(externalWorktree), true)
+
+    const applied = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], options)
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout || applied.error || 'process did not start')
+    const applySummary = JSON.parse(applied.stdout)
+    assert.equal(applySummary.deleted, 1)
+    assert.equal(applySummary.errors, 0)
+    assert.equal(existsSync(externalWorktree), false)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, /repo-feature/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a clean merged managed worktree while a process is using it', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-in-use-'))
+  let activeProcess
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const managedWorktree = path.join(fixtureRoot, 'repo-feature')
+    git(repo, ['worktree', 'move', worktree, managedWorktree])
+    activeProcess = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); setInterval(() => {}, 1000)'], {
+      cwd: managedWorktree,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    await new Promise((resolve, reject) => {
+      activeProcess.stdout.once('data', resolve)
+      activeProcess.once('error', reject)
+    })
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.results.some((item) => item.action === 'skip' && item.reason === 'worktree-in-use'), true)
+    assert.equal(summary.results.find((item) => item.action === 'skip')?.next_action, '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください')
+    assert.equal(existsSync(managedWorktree), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    if (activeProcess && activeProcess.exitCode === null && activeProcess.signalCode === null) {
+      activeProcess.kill('SIGKILL')
+      await new Promise((resolve) => activeProcess.once('close', resolve))
+    }
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('skips deleting a worktree when a process cannot be inspected', { skip: process.platform !== 'linux' || !run('which', ['ssh-agent']).stdout.trim() }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-uninspectable-daemon-'))
+  let activeProcess
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const socketPath = path.join(fixtureRoot, 'ssh-agent.sock')
+    activeProcess = spawn(run('which', ['ssh-agent']).stdout.trim(), ['-D', '-a', socketPath], {
+      cwd: worktree,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    await new Promise((resolve, reject) => {
+      activeProcess.once('spawn', resolve)
+      activeProcess.once('error', reject)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(activeProcess.exitCode, null, 'ssh-agent should remain alive during the cleanup check')
+
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const options = {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    }
+    const cron = run(entrypoint, ['--cron'], options)
+    assert.equal(cron.status, 0, cron.stderr || cron.stdout || cron.error || 'cron cleanup should report a skipped worktree')
+    assert.match(cron.stdout, /skip: .*worktree-process-check-unavailable/)
+    assert.match(cron.stdout, /processの使用状況を確認できなかったため削除をskipしました/)
+    const result = run(entrypoint, ['--apply', '--json'], options)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cleanup should skip an uninspectable worktree')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results.some((item) => item.action === 'skip' && item.reason === 'worktree-process-check-unavailable'), true)
+    assert.equal(summary.results.find((item) => item.action === 'skip')?.next_action, '対象processが終了するか確認可能な状態になってから再実行してください')
+    assert.equal(existsSync(worktree), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    if (activeProcess && activeProcess.exitCode === null && activeProcess.signalCode === null) {
+      activeProcess.kill('SIGKILL')
+      await new Promise((resolve) => activeProcess.once('close', resolve))
+    }
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores and skips a worktree if a process starts using it after quarantine', { skip: process.platform !== 'linux' }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-process-after-quarantine-'))
+  const candidate = path.join(fixtureRoot, 'repo-feature')
+  let pidFile
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['worktree', 'move', worktree, candidate])
+    const injection = await installProcessInjectionTools(fixtureRoot, candidate, 'after-quarantine')
+    pidFile = injection.pidFile
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], injection.options)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cleanup should skip a worktree used after quarantine')
+    assert.equal(existsSync(pidFile), true)
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'worktree-in-use')
+    assert.equal(summary.results[0].next_action, '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください')
+    assert.equal(existsSync(candidate), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, /\.cleanup-repo-feature-/)
+  } finally {
+    if (pidFile) await stopInjectedProcess(pidFile)
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('reports restore failure when Git claims success without moving a process-using quarantine', { skip: process.platform !== 'linux' }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-process-restore-failed-'))
+  const candidate = path.join(fixtureRoot, 'repo-feature')
+  let pidFile
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['worktree', 'move', worktree, candidate])
+    const injection = await installProcessInjectionTools(fixtureRoot, candidate, 'after-quarantine', true)
+    pidFile = injection.pidFile
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], injection.options)
+    assert.equal(existsSync(pidFile), true)
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.skipped, 0)
+    assert.equal(summary.results[0].reason, 'worktree-process-check-failed')
+    assert.match(summary.results[0].detail, /restore failed:.*(registration|quarantine|path)/i)
+    assert.equal(summary.results[0].next_action, 'quarantine pathとworktree registrationを確認し、安全な復旧手順を判断してください')
+    assert.equal(existsSync(candidate), false)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    const quarantineListing = git(repo, ['worktree', 'list', '--porcelain']).stdout
+    assert.match(quarantineListing, /\.cleanup-repo-feature-/)
+    assert.match(quarantineListing, /locked clean-merged-branches initial identity fence/)
+  } finally {
+    if (pidFile) await stopInjectedProcess(pidFile)
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('retains the registration fence when a non-process rollback cannot be verified', { skip: process.platform !== 'linux' }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-status-restore-failed-'))
+  const candidate = path.join(fixtureRoot, 'repo-feature')
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['worktree', 'move', worktree, candidate])
+    const injection = await installProcessInjectionTools(fixtureRoot, candidate, 'status-failure', true)
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], injection.options)
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'status-recheck-failed-before-remove')
+    assert.match(summary.results[0].detail, /restore failed:.*(registration|quarantine|path)/i)
+    assert.equal(existsSync(candidate), false)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+    const quarantineListing = git(repo, ['worktree', 'list', '--porcelain']).stdout
+    assert.match(quarantineListing, /\.cleanup-repo-feature-/)
+    assert.match(quarantineListing, /locked clean-merged-branches initial identity fence/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('checks for new process use before cleaning ignored files', { skip: process.platform !== 'linux' }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-process-before-clean-'))
+  const candidate = path.join(fixtureRoot, 'repo-feature')
+  let pidFile
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'cache/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'ignore generated cache'])
+    await mkdir(path.join(worktree, 'cache'))
+    await writeFile(path.join(worktree, 'cache', 'generated.txt'), 'keep while process is active\n')
+    mergeCandidateIntoMain(repo)
+    git(repo, ['worktree', 'move', worktree, candidate])
+    const injection = await installProcessInjectionTools(fixtureRoot, candidate, 'before-clean')
+    pidFile = injection.pidFile
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], injection.options)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cleanup should skip a newly used worktree')
+    assert.equal(existsSync(pidFile), true)
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.results[0].reason, 'worktree-in-use')
+    assert.equal(summary.results[0].next_action, '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください')
+    assert.equal(existsSync(path.join(candidate, 'cache', 'generated.txt')), true)
+    assert.equal(existsSync(candidate), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    if (pidFile) await stopInjectedProcess(pidFile)
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('checks for new process use immediately before final worktree removal', { skip: process.platform !== 'linux' }, async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-process-before-remove-'))
+  const candidate = path.join(fixtureRoot, 'repo-feature')
+  let pidFile
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['worktree', 'move', worktree, candidate])
+    const injection = await installProcessInjectionTools(fixtureRoot, candidate, 'before-remove')
+    pidFile = injection.pidFile
+    const result = run(entrypoint, ['--root', fixtureRoot, '--apply', '--json'], injection.options)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cleanup should skip a worktree used before final removal')
+    assert.equal(existsSync(pidFile), true)
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'worktree-in-use')
+    assert.equal(summary.results[0].next_action, '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください')
+    assert.equal(existsSync(candidate), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    if (pidFile) await stopInjectedProcess(pidFile)
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a clean merged worktree outside the managed root', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-outside-managed-root-'))
+  const fixtureRoot = path.join(parent, 'managed')
+  try {
+    await mkdir(fixtureRoot)
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    const externalWorktree = path.join(parent, 'outside-worktree')
+    git(repo, ['worktree', 'move', worktree, externalWorktree])
+
+    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.would_delete, 0)
+    assert.equal(summary.results[0].action, 'skip')
+    assert.equal(summary.results[0].reason, 'outside-managed-worktree-root')
+    assert.equal(existsSync(externalWorktree), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    await rm(parent, { recursive: true, force: true })
+  }
+})
+
+test('prunes stale origin tracking refs without deleting remote branches or unconfigured PR refs', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-origin-prune-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['push', '-q', '-u', 'origin', 'feature'])
+    git(repo, ['fetch', '-q', 'origin', 'feature'])
+    const featureHead = git(repo, ['rev-parse', 'refs/remotes/origin/feature']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/pr/999', featureHead])
+    git(repo, ['push', '-q', 'origin', '--delete', 'feature'])
+    // push --deleteでtracking refも更新される環境に備え、remote側だけで削除された状態を再現する。
+    git(repo, ['update-ref', 'refs/remotes/origin/feature', featureHead])
+
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const options = {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    }
+
+    const dryRun = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--json'], options)
+    assert.equal(dryRun.status, 0, dryRun.stderr || dryRun.stdout || dryRun.error || 'process did not start')
+    const drySummary = JSON.parse(dryRun.stdout)
+    assert.equal(drySummary.would_prune_remote_refs, 1, JSON.stringify(drySummary, null, 2))
+    assert.equal(drySummary.results.some((item) => item.target === 'remote-tracking-ref' && item.action === 'would-prune' && item.head === featureHead), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/remotes/origin/feature']).status, 0)
+
+    const applied = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--apply', '--json'], options)
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout || applied.error || 'process did not start')
+    const applySummary = JSON.parse(applied.stdout)
+    assert.equal(applySummary.pruned_remote_refs, 1)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/remotes/origin/feature']).status, 1)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/remotes/pr/999']).status, 0)
+    assert.equal(git(repo, ['ls-remote', '--heads', 'origin', 'refs/heads/feature']).stdout.trim(), '')
+    assert.notEqual(git(repo, ['ls-remote', '--heads', 'origin', 'refs/heads/main']).stdout.trim(), '')
+    assert.equal(existsSync(worktree), false)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('uses compare-and-delete so a concurrent origin tracking ref update is preserved', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-origin-prune-cas-'))
+  try {
+    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    mergeCandidateIntoMain(repo)
+    git(repo, ['push', '-q', '-u', 'origin', 'feature'])
+    git(repo, ['fetch', '-q', 'origin', 'feature'])
+    const featureHead = git(repo, ['rev-parse', 'refs/remotes/origin/feature']).stdout.trim()
+    const replacementHead = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    git(repo, ['push', '-q', 'origin', '--delete', 'feature'])
+    git(repo, ['update-ref', 'refs/remotes/origin/feature', featureHead])
+
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = run('which', ['git']).stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh\nif [ "$1" = "-C" ] && [ "$2" = "${repo}" ] && [ "$3" = "update-ref" ] && [ "$4" = "-d" ] && [ "$5" = "refs/remotes/origin/feature" ]; then\n  "${realGit}" -C "${repo}" update-ref refs/remotes/origin/feature "${replacementHead}"\nfi\nexec "${realGit}" "$@"\n`)
+    await chmod(fakeGit, 0o755)
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'expected compare-and-delete failure')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.errors, 1, JSON.stringify(summary, null, 2))
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/feature']).stdout.trim(), replacementHead)
+    assert.equal(summary.results.some((item) => item.target === 'remote-tracking-ref' && item.action === 'error'), true)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
@@ -1901,6 +2363,7 @@ async function ghCalls(logPath) {
 
 test('deletes merged local branches that have no worktree and skips unmerged ones', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unattached-'))
+  const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-outside-managed-root-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
     // The upstream lags behind the merged local branch, which `git branch -d` would refuse.
@@ -1921,7 +2384,7 @@ test('deletes merged local branches that have no worktree and skips unmerged one
     await mkdir(fakeBin, { recursive: true })
     const ghLog = path.join(fixtureRoot, 'gh.log')
     await writeLoggingGh(fakeBin, ghLog, [])
-    const other = path.join(fixtureRoot, 'other')
+    const other = path.join(outsideRoot, 'other')
     git(repo, ['worktree', 'add', '-q', other, 'checked-out'])
 
     const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
@@ -1947,6 +2410,7 @@ test('deletes merged local branches that have no worktree and skips unmerged one
     assert.equal((await ghCalls(ghLog)).length, 1)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
+    await rm(outsideRoot, { recursive: true, force: true })
   }
 })
 
