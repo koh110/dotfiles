@@ -14,14 +14,14 @@ function usage() {
   process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
 }
 
-function run(command, args, options = {}) {
+function run(command: string, args: string[], options: { cwd?: string, timeout?: number, input?: string | Uint8Array, env?: typeof config.environment } = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeout || (command === 'gh' ? 60_000 : 30_000),
     killSignal: 'SIGKILL',
-    env: config.environment,
+    env: options.env ?? config.environment,
     input: options.input
   })
   return {
@@ -701,6 +701,13 @@ function dockerInspectContainer(containerId) {
   }
 }
 
+function composeTeardownEnvironment() {
+  const environment = { ...config.environment }
+  if (!environment.LOCAL_UID && typeof process.geteuid === 'function') environment.LOCAL_UID = String(process.geteuid())
+  if (!environment.LOCAL_GID && typeof process.getegid === 'function') environment.LOCAL_GID = String(process.getegid())
+  return environment
+}
+
 function composeTeardownForWorktree(worktree, apply) {
   const listed = run('docker', ['ps', '-aq', '--filter', 'label=com.docker.compose.project'])
   if (listed.error && listed.error.includes('ENOENT')) return { ok: false, code: 'compose-query-failed', error: commandDiagnostic('docker', ['ps', '-aq', '--filter', 'label=com.docker.compose.project'], listed) }
@@ -755,7 +762,7 @@ function composeTeardownForWorktree(worktree, apply) {
     const args = ['compose', '-p', project.name]
     for (const configFile of project.configFiles) args.push('-f', configFile)
     args.push('down', '--remove-orphans')
-    const stopped = run('docker', args)
+    const stopped = run('docker', args, { env: composeTeardownEnvironment() })
     const readBack = run('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project.name}`])
     if (!stopped.ok) return { ok: false, code: 'compose-down-failed', error: commandDiagnostic('docker', args, stopped), projects: teardowns }
     if (!readBack.ok || readBack.stdout.trim()) return { ok: false, code: 'compose-containers-still-running', error: commandDiagnostic('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project.name}`], readBack), projects: teardowns }

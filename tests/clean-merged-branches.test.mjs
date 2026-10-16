@@ -1692,6 +1692,76 @@ test('fails closed when Docker CLI startup fails during apply', async () => {
   }
 })
 
+test('supplies the effective host UID/GID to Compose teardown for an LLM override', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-compose-env-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const composeFile = path.join(worktree, 'compose.yml')
+    const llmComposeFile = path.join(worktree, 'compose.llm.yml')
+    await writeFile(composeFile, 'services:\n  db:\n    image: mysql:8.0\n')
+    await writeFile(llmComposeFile, 'services:\n  db:\n    user: "${LOCAL_UID:?}:${LOCAL_GID:?}"\n')
+    git(worktree, ['add', 'compose.yml', 'compose.llm.yml'])
+    git(worktree, ['commit', '-qm', 'add agent compose override'])
+    mergeCandidateIntoMain(repo)
+
+    const candidateInspect = JSON.stringify([{
+      Config: {
+        Labels: {
+          'com.docker.compose.project': 'llm-project',
+          'com.docker.compose.project.working_dir': worktree,
+          'com.docker.compose.project.config_files': `${composeFile},${llmComposeFile}`,
+        },
+      },
+      Mounts: [],
+    }])
+    const expectedUid = String(process.geteuid())
+    const expectedGid = String(process.getegid())
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, `#!/bin/sh
+set -eu
+if [ "$1" = "ps" ]; then
+  case " $* " in
+    *'label=com.docker.compose.project=llm-project'*) exit 0 ;;
+    *) printf '%s\\n' candidate-container; exit 0 ;;
+  esac
+fi
+if [ "$1" = "inspect" ]; then
+  [ "$2" = candidate-container ] || exit 1
+  printf '%s\\n' '${candidateInspect}'
+  exit 0
+fi
+if [ "$1" = "compose" ]; then
+  if [ "\${LOCAL_UID:-}" != '${expectedUid}' ] || [ "\${LOCAL_GID:-}" != '${expectedGid}' ]; then
+    printf 'expected host UID/GID ${expectedUid}:${expectedGid}, got %s:%s\\n' "\${LOCAL_UID:-}" "\${LOCAL_GID:-}" >&2
+    exit 43
+  fi
+  exit 0
+fi
+printf '%s\\n' 'unexpected docker command' >&2
+exit 99
+`)
+    await chmod(fakeDocker, 0o755)
+
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+      clearEnv: ['LOCAL_UID', 'LOCAL_GID'],
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- deleted:/)
+    assert.match(result.stdout, /削除: 1/)
+    assert.match(result.stdout, /エラー: 0/)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
 test('blocks Compose teardown when a project name is shared with another worktree', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-compose-'))
   try {
