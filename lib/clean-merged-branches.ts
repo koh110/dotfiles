@@ -11,7 +11,7 @@ import { loadCleanMergedBranchesConfig } from './clean-merged-branches-config.ts
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations are pruned first; only clean, unlocked worktrees under <repo>/.worktree are eligible for removal. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, merged, unlocked linked worktrees under GIT_REPOSITORIES_ROOT are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
 }
 
 function run(command, args, options = {}) {
@@ -464,7 +464,7 @@ async function openWorktreeRegistrationEntry(registrationPath: string) {
   }
 }
 
-async function acquireInitialRegistrationFences(repo: string) {
+async function acquireInitialRegistrationFences(repo: string, eligibleRoot: string | null) {
   const commonDirResult = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   if (!commonDirResult.ok || !path.isAbsolute(commonDirResult.stdout.trim())) {
     return {
@@ -474,15 +474,14 @@ async function acquireInitialRegistrationFences(repo: string) {
         : `git common directory is not absolute: ${commonDirResult.stdout.trim() || '<empty>'}`,
     }
   }
+  if (!eligibleRoot) return { ok: true, fences: new Map(), allowedRoot: null, release: async () => ({ ok: true }) }
   let allowedRoot: string
   try {
-    allowedRoot = await fs.realpath(path.join(repo, '.worktree'))
+    allowedRoot = await fs.realpath(eligibleRoot)
   } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
-    if (code === 'ENOENT') return { ok: true, fences: new Map(), allowedRoot: null, release: async () => ({ ok: true }) }
     return { ok: false, error: `eligible worktree root query failed: ${errorText(error)}` }
   }
-  if (!isWithin(allowedRoot, repo)) return { ok: false, error: `eligible worktree root escapes repository: ${allowedRoot}` }
+  if (allowedRoot !== eligibleRoot) return { ok: false, error: `eligible worktree root identity changed: ${allowedRoot} != ${eligibleRoot}` }
   const registrationRoot = path.join(commonDirResult.stdout.trim(), 'worktrees')
   let entries
   try {
@@ -887,6 +886,125 @@ function pruneWorktreeRegistrations(repo, apply) {
     : { ok: false, args, error: commandDiagnostic('git', ['-C', repo, ...args], result) }
 }
 
+type OriginTrackingRef = { ref: string; branch: string; oid: string }
+
+function listOriginTrackingRefs(repo: string) {
+  const args = ['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/remotes/origin/']
+  const result = git(repo, args)
+  if (!result.ok) return { ok: false as const, refs: null, error: commandDiagnostic('git', ['-C', repo, ...args], result) }
+  const refs = new Map<string, string>()
+  for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
+    const [ref, oid, ...extra] = line.split('\0')
+    if (extra.length > 0 || !ref?.startsWith('refs/remotes/origin/') || !isGitObjectId(oid)) {
+      return { ok: false as const, refs: null, error: 'git for-each-ref returned a malformed origin tracking ref record' }
+    }
+    refs.set(ref, oid)
+  }
+  return { ok: true as const, refs, error: null }
+}
+
+function originPruneCandidates(repo: string) {
+  const remotes = git(repo, ['remote'])
+  if (!remotes.ok) return { ok: false as const, error: commandDiagnostic('git', ['-C', repo, 'remote'], remotes) }
+  if (!remotes.stdout.split(/\r?\n/).includes('origin')) return { ok: true as const, candidates: [] }
+  const localRefs = listOriginTrackingRefs(repo)
+  if (!localRefs.ok || !localRefs.refs) return { ok: false as const, error: localRefs.error || 'origin refs could not be read' }
+  const args = ['remote', 'prune', '--dry-run', 'origin']
+  const preview = git(repo, args, { timeout: 120_000 })
+  if (!preview.ok) return { ok: false as const, error: commandDiagnostic('git', ['-C', repo, ...args], preview) }
+  const candidates: OriginTrackingRef[] = []
+  for (const line of preview.stdout.split(/\r?\n/)) {
+    if (!line.includes('[would prune]')) continue
+    const match = line.match(/^\s*\*\s+\[would prune\]\s+(origin\/.+)$/)
+    if (!match) return { ok: false as const, error: `git remote prune returned a malformed stale ref record: ${line}` }
+    const ref = `refs/remotes/${match[1]}`
+    const validRef = git(repo, ['check-ref-format', ref])
+    if (ref === 'refs/remotes/origin/HEAD' || !validRef.ok) return { ok: false as const, error: `git remote prune returned an invalid origin ref: ${ref}` }
+    const oid = localRefs.refs.get(ref)
+    if (!oid) return { ok: false as const, error: `stale origin ref was not present in the local snapshot: ${ref}` }
+    candidates.push({ ref, branch: match[1], oid })
+  }
+  if (new Set(candidates.map((item) => item.ref)).size !== candidates.length) {
+    return { ok: false as const, error: 'git remote prune returned duplicate stale origin refs' }
+  }
+  return { ok: true as const, candidates }
+}
+
+function originTrackingRefResult(repo: string, item: OriginTrackingRef, action: 'would-prune' | 'pruned' | 'error', detail?: string) {
+  return {
+    repo,
+    target: 'remote-tracking-ref',
+    ref: item.ref,
+    branch: item.branch,
+    head: item.oid,
+    action,
+    reason: 'stale-origin-tracking-ref',
+    detail,
+  }
+}
+
+function pruneOriginTrackingRefs(repo: string, apply: boolean) {
+  const preview = originPruneCandidates(repo)
+  if (!preview.ok) return { ok: false, results: [{ repo, action: 'error', reason: 'origin-tracking-ref-prune-query-failed', detail: preview.error }] }
+  if (preview.candidates.length === 0) return { ok: true, results: [] }
+  if (!apply) return { ok: true, results: preview.candidates.map((item) => originTrackingRefResult(repo, item, 'would-prune')) }
+
+  // Apply only the exact ref/OID snapshot after a second dry-run confirms the same candidate set.
+  // Never use `git remote prune` for mutation: its broader refspec scope can change after preview.
+  const confirmation = originPruneCandidates(repo)
+  if (!confirmation.ok) {
+    return { ok: false, results: [{ repo, action: 'error', reason: 'origin-tracking-ref-prune-confirmation-failed', detail: confirmation.error }] }
+  }
+  const expected = new Map(preview.candidates.map((item) => [item.ref, item.oid]))
+  const confirmed = new Map(confirmation.candidates.map((item) => [item.ref, item.oid]))
+  if (expected.size !== confirmed.size || [...expected].some(([ref, oid]) => confirmed.get(ref) !== oid)) {
+    return {
+      ok: false,
+      results: [{
+        repo,
+        action: 'error',
+        reason: 'origin-tracking-ref-prune-candidate-set-changed',
+        detail: 'origin stale-ref candidates or expected object IDs changed between preview and apply; no refs were deleted',
+      }],
+    }
+  }
+
+  const deleted = []
+  const results = []
+  for (const item of preview.candidates) {
+    const removed = git(repo, ['update-ref', '-d', item.ref, item.oid])
+    if (!removed.ok) {
+      results.push(originTrackingRefResult(
+        repo,
+        item,
+        'error',
+        commandDiagnostic('git', ['-C', repo, 'update-ref', '-d', item.ref, item.oid], removed),
+      ))
+      continue
+    }
+    deleted.push(item)
+  }
+
+  const after = listOriginTrackingRefs(repo)
+  if (!after.ok) {
+    return {
+      ok: false,
+      results: [...results, { repo, action: 'error', reason: 'origin-tracking-ref-prune-readback-failed', detail: after.error }],
+    }
+  }
+  for (const item of deleted) {
+    const currentOid = after.refs.get(item.ref)
+    if (currentOid === undefined) {
+      results.push(originTrackingRefResult(repo, item, 'pruned'))
+    } else if (currentOid === item.oid) {
+      results.push(originTrackingRefResult(repo, item, 'error', `${item.ref} remains after compare-and-delete`))
+    } else {
+      results.push(originTrackingRefResult(repo, { ...item, oid: currentOid }, 'error', `${item.ref} changed during compare-and-delete`))
+    }
+  }
+  return { ok: results.every((item) => item.action !== 'error'), results }
+}
+
 function defaultBranchStatusArgs(defaultPath, worktrees) {
   const exclusions = []
   for (const worktree of worktrees) {
@@ -1095,21 +1213,76 @@ function isWithin(child, parent) {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
-async function discoverRepos(root, explicitRepos) {
-  if (explicitRepos.length) return explicitRepos.map((repo) => path.resolve(repo))
-  const repos = []
+async function resolvePrimaryCheckout(repo: string) {
+  const realCandidate = await fs.realpath(repo).catch(() => null)
+  const gitDirResult = git(repo, ['rev-parse', '--path-format=absolute', '--git-dir'])
+  const commonDirResult = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (!realCandidate || !gitDirResult.ok || !commonDirResult.ok) return null
+  const realGitDir = await fs.realpath(gitDirResult.stdout.trim()).catch(() => null)
+  const realCommonDir = await fs.realpath(commonDirResult.stdout.trim()).catch(() => null)
+  if (!realGitDir || !realCommonDir) return null
+  if (realGitDir === realCommonDir) return { repo: realCandidate, commonDir: realCommonDir }
+
+  const listing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+  if (!listing.ok) return null
+  for (const worktree of parseWorktrees(listing.stdout)) {
+    const candidate = path.resolve(worktree.path)
+    const realWorktree = await fs.realpath(candidate).catch(() => null)
+    if (!realWorktree) continue
+    const worktreeGitDir = git(candidate, ['rev-parse', '--path-format=absolute', '--git-dir'])
+    if (!worktreeGitDir.ok) continue
+    const realWorktreeGitDir = await fs.realpath(worktreeGitDir.stdout.trim()).catch(() => null)
+    if (realWorktreeGitDir === realCommonDir) return { repo: realWorktree, commonDir: realCommonDir }
+  }
+  return null
+}
+
+async function discoverRepos(root: string, explicitRepos: string[]) {
+  if (explicitRepos.length) {
+    const repos = new Set()
+    for (const repo of explicitRepos) {
+      const primary = await resolvePrimaryCheckout(path.resolve(repo))
+      if (!primary) throw new Error(`could not resolve the primary checkout for --repo ${repo}`)
+      repos.add(primary.repo)
+    }
+    return [...repos].sort()
+  }
+
+  const reposByCommonDir = new Map()
   const entries = await fs.readdir(root, { withFileTypes: true })
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === 'tmp') continue
     const candidate = path.join(root, entry.name)
     try {
       await fs.access(path.join(candidate, '.git'))
-      repos.push(candidate)
+      const primary = await resolvePrimaryCheckout(candidate)
+      if (primary) reposByCommonDir.set(primary.commonDir, primary.repo)
     } catch {
-      // Not a root checkout.
+      // Not a root checkout or linked worktree.
     }
   }
-  return repos.sort()
+  return [...new Set(reposByCommonDir.values())].sort()
+}
+
+async function resolveEligibleWorktreeRoot(repo: string, managedRoot: string | null) {
+  if (managedRoot) {
+    try {
+      return { ok: true, path: await fs.realpath(managedRoot) }
+    } catch (error) {
+      return { ok: false, path: null, error: `managed worktree root query failed: ${errorText(error)}` }
+    }
+  }
+
+  const localRoot = path.join(repo, '.worktree')
+  try {
+    const realLocalRoot = await fs.realpath(localRoot)
+    if (!isWithin(realLocalRoot, repo)) return { ok: false, path: null, error: `eligible worktree root escapes repository: ${realLocalRoot}` }
+    return { ok: true, path: realLocalRoot }
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+    if (code === 'ENOENT') return { ok: true, path: null }
+    return { ok: false, path: null, error: `eligible worktree root query failed: ${errorText(error)}` }
+  }
 }
 
 function defaultBranch(repo, explicitName = null) {
@@ -1153,6 +1326,117 @@ function ignoredFiles(repo) {
 function ignoredFilesDetail(result) {
   const count = result.stdout.split('\0').filter(Boolean).length
   return `${count} ignored path${count === 1 ? '' : 's'}`
+}
+
+function isSameOrWithin(child: string, parent: string) {
+  const relative = path.relative(parent, child)
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+}
+
+function processErrorCode(error: unknown) {
+  return error && typeof error === 'object' && 'code' in error ? error.code : undefined
+}
+
+function processPathIsWithin(target: string, value: string) {
+  const pathname = value.endsWith(' (deleted)') ? value.slice(0, -' (deleted)'.length) : value
+  return path.isAbsolute(pathname) && isSameOrWithin(path.resolve(pathname), target)
+}
+
+async function processStartTime(pid: string) {
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8')
+    const closingParen = stat.lastIndexOf(')')
+    if (closingParen < 0) return { ok: false, error: `/proc/${pid}/stat has no process-name terminator` }
+    const startTime = stat.slice(closingParen + 2).trim().split(/\s+/)[19]
+    if (!/^\d+$/.test(startTime || '')) return { ok: false, error: `/proc/${pid}/stat has an invalid start time` }
+    return { ok: true, startTime }
+  } catch (error) {
+    if (processErrorCode(error) === 'ENOENT') return { ok: true, gone: true }
+    return { ok: false, error: `/proc/${pid}/stat could not be read: ${errorText(error)}` }
+  }
+}
+
+async function processLink(pid: string, name: string) {
+  try {
+    return { ok: true, path: await fs.readlink(`/proc/${pid}/${name}`) }
+  } catch (error) {
+    const code = processErrorCode(error)
+    if (code === 'ENOENT' || code === 'ESRCH' || code === 'EINVAL') return { ok: true, path: null }
+    return { ok: false, error: `/proc/${pid}/${name} could not be read: ${errorText(error)}`, code }
+  }
+}
+
+async function processUsesWorktree(worktreePath: string) {
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function') {
+    return { ok: false, error: 'process-usage inspection requires Linux /proc and a process UID' }
+  }
+  let target: string
+  try {
+    target = await fs.realpath(worktreePath)
+  } catch (error) {
+    return { ok: false, error: `worktree realpath could not be read: ${errorText(error)}` }
+  }
+  let entries
+  try {
+    entries = await fs.readdir('/proc')
+  } catch (error) {
+    return { ok: false, error: `/proc could not be listed: ${errorText(error)}` }
+  }
+
+  for (const pid of entries) {
+    if (!/^\d+$/.test(pid)) continue
+    let status
+    try {
+      status = await fs.readFile(`/proc/${pid}/status`, 'utf8')
+    } catch (error) {
+      if (processErrorCode(error) === 'ENOENT') continue
+      return { ok: false, error: `/proc/${pid}/status could not be read: ${errorText(error)}` }
+    }
+    const uidLine = status.split('\n').find((line) => line.startsWith('Uid:'))
+    const uidValues = uidLine?.trim().split(/\s+/).slice(1).map(Number)
+    if (!uidValues || uidValues.length < 4 || uidValues.some((value) => !Number.isInteger(value))) {
+      return { ok: false, error: `/proc/${pid}/status has an invalid UID record` }
+    }
+    if (!uidValues.includes(process.getuid())) continue
+    const processName = status.split('\n').find((line) => line.startsWith('Name:'))?.slice('Name:'.length).trim()
+    const before = await processStartTime(pid)
+    if (!before.ok) return { ok: false, error: before.error }
+    if (before.gone) continue
+    let usage = null
+    for (const name of ['cwd', 'exe']) {
+      const linked = await processLink(pid, name)
+      if (!linked.ok) return { ok: false, error: `/proc/${pid} (${processName || 'unknown'})/${name} could not be read: ${linked.error}` }
+      if (linked.path && processPathIsWithin(target, linked.path)) {
+        usage = name
+        break
+      }
+    }
+    if (!usage) {
+      let descriptors: string[] = []
+      try {
+        descriptors = await fs.readdir(`/proc/${pid}/fd`)
+      } catch (error) {
+        const code = processErrorCode(error)
+        if (code === 'ENOENT') descriptors = []
+        else return { ok: false, error: `/proc/${pid}/fd could not be listed: ${errorText(error)}` }
+      }
+      for (const descriptor of descriptors || []) {
+        const linked = await processLink(pid, `fd/${descriptor}`)
+        if (!linked.ok) return { ok: false, error: linked.error }
+        if (linked.path && processPathIsWithin(target, linked.path)) {
+          usage = `fd/${descriptor}`
+          break
+        }
+      }
+    }
+
+    const after = await processStartTime(pid)
+    if (!after.ok) return { ok: false, error: after.error }
+    if (after.gone) continue
+    if (after.startTime !== before.startTime) return { ok: false, error: `process ${pid} identity changed during worktree usage inspection` }
+    if (usage) return { ok: true, used: true, pid, location: usage }
+  }
+  return { ok: true, used: false }
 }
 
 function remoteDefaultState(repo, expectedName, explicit = false) {
@@ -1314,15 +1598,15 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
   return { ok: true, evidence: null }
 }
 
-async function inspectRepository(repo, apply, explicitDefaultBranch) {
+async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null, managedRoot: string | null) {
   const realRepo = await fs.realpath(repo)
-  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
+  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, managedRoot)
   const lock = await acquireCleanupLock(realRepo)
   if (!lock.ok) return [{ repo: realRepo, action: 'error', reason: lock.code, detail: lock.error }]
-  let results
+  let results = []
   let inspectionError = null
   try {
-    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
+    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, managedRoot)
   } catch (error) {
     inspectionError = error
   }
@@ -1335,9 +1619,12 @@ async function inspectRepository(repo, apply, explicitDefaultBranch) {
   return results
 }
 
-async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch) {
+async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, explicitDefaultBranch: string | null, managedRoot: string | null) {
   const results: any[] = []
-  const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo) : { ok: true, fences: new Map(), release: async () => ({ ok: true }) }
+  const eligibleRoot = await resolveEligibleWorktreeRoot(realRepo, managedRoot)
+  if (!eligibleRoot.ok) return [{ repo: realRepo, action: 'error', reason: 'eligible-worktree-root-query-failed', detail: eligibleRoot.error }]
+  const realAllowedRoot = eligibleRoot.path
+  const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo, realAllowedRoot) : { ok: true, fences: new Map(), allowedRoot: realAllowedRoot, release: async () => ({ ok: true }) }
   if (!initialFences.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-registration-fence-failed', detail: initialFences.error }]
   const listing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
   if (!listing.ok) {
@@ -1406,6 +1693,8 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     }
   }
   const initialPrunable = candidateWorktrees.filter((item) => item.prunable !== undefined)
+  const originPrune = pruneOriginTrackingRefs(realRepo, apply)
+  results.push(...originPrune.results)
   let registrationFenceFailure = false
   try {
   const plannedPrunablePaths = new Set(initialPrunable.map((item) => path.resolve(item.path)))
@@ -1467,15 +1756,6 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     if (!finalSnapshot.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-refresh-failed', detail: finalSnapshot.error })
     return prerequisiteFailure({ repo: realRepo, action: 'skip', severity: 'warn', reason: dirtyRefresh.code, detail: dirtyRefresh.error, dirty_status: dirtyRefresh.dirty_status })
   }
-  const allowedRoot = path.join(realRepo, '.worktree')
-  let realAllowedRoot: string | null = null
-  try {
-    const resolvedAllowedRoot = await fs.realpath(allowedRoot)
-    if (isWithin(resolvedAllowedRoot, realRepo)) realAllowedRoot = resolvedAllowedRoot
-  } catch {
-    // Repositories without a physical in-repository .worktree directory have no eligible candidates.
-  }
-
   for (const item of worktrees) {
     const candidate = path.resolve(item.path)
     if (candidate === realRepo) continue
@@ -1492,8 +1772,8 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'error', reason: 'candidate-realpath-failed', detail: errorText(error) })
       continue
     }
-    if (!realAllowedRoot || !isWithin(realCandidate, realAllowedRoot)) {
-      results.push({ ...base, action: 'skip', reason: 'outside-repo-worktree-root' })
+    if (!realAllowedRoot || !isWithin(candidate, realAllowedRoot) || !isWithin(realCandidate, realAllowedRoot)) {
+      results.push({ ...base, action: 'skip', reason: 'outside-managed-worktree-root' })
       continue
     }
     const initialFence = apply ? initialFences.fences.get(candidate) : null
@@ -1521,6 +1801,15 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     const ignoredBeforeQuarantine = ignoredFiles(candidate)
     if (!ignoredBeforeQuarantine.ok) {
       results.push({ ...base, action: 'error', reason: 'ignored-files-query-failed', detail: commandDiagnostic('git', ['-C', candidate, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredBeforeQuarantine) })
+      continue
+    }
+    const processUsage = await processUsesWorktree(realCandidate)
+    if (!processUsage.ok) {
+      results.push({ ...base, action: 'skip', reason: 'worktree-process-check-unavailable', detail: processUsage.error, next_action: processNextAction('worktree-process-check-unavailable') })
+      continue
+    }
+    if (processUsage.used) {
+      results.push({ ...base, action: 'skip', reason: 'worktree-in-use', detail: `pid ${processUsage.pid} uses ${processUsage.location}`, next_action: processNextAction('worktree-in-use') })
       continue
     }
 
@@ -1591,38 +1880,103 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       results.push({ ...base, action: 'would-delete', reason: 'merged', evidence, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined })
       continue
     }
-    const quarantine = path.join(realAllowedRoot, `.cleanup-${path.basename(candidate)}-${randomBytes(16).toString('hex')}`)
+    const quarantineParent = path.dirname(realCandidate)
+    if (quarantineParent !== realAllowedRoot && !isWithin(quarantineParent, realAllowedRoot)) {
+      results.push({ ...base, action: 'error', reason: 'quarantine-parent-outside-managed-root', evidence })
+      continue
+    }
+    const quarantine = path.join(quarantineParent, `.cleanup-${path.basename(candidate)}-${randomBytes(16).toString('hex')}`)
     const movedToQuarantine = git(realRepo, ['worktree', 'move', '-f', '-f', candidate, quarantine])
     if (!movedToQuarantine.ok) {
       registrationFenceFailure = true
       results.push({ ...base, action: 'error', reason: 'worktree-quarantine-move-failed', detail: movedToQuarantine.stderr.trim(), evidence })
       continue
     }
-    const restoreQuarantine = () => git(realRepo, ['worktree', 'move', '-f', '-f', quarantine, candidate])
+    const restoreQuarantine = async () => {
+      const moveArgs = ['worktree', 'move', '-f', '-f', quarantine, candidate]
+      const moved = git(realRepo, moveArgs)
+      const moveError = moved.ok ? '' : `; move command failed: ${commandDiagnostic('git', ['-C', realRepo, ...moveArgs], moved)}`
+      const failRestore = (error: string) => {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        return { ok: false, stderr: `${error}${moveError}` }
+      }
+      const listingArgs = ['worktree', 'list', '--porcelain', '-z']
+      const listing = git(realRepo, listingArgs)
+      if (!listing.ok) return failRestore(commandDiagnostic('git', ['-C', realRepo, ...listingArgs], listing))
+      const registrations = parseWorktrees(listing.stdout)
+      const restoredRegistration = registrations.find((worktree) => path.resolve(worktree.path) === path.resolve(candidate))
+      const quarantineRegistration = registrations.find((worktree) => path.resolve(worktree.path) === path.resolve(quarantine))
+      if (!restoredRegistration || quarantineRegistration) return failRestore(`restore registration read-back failed: original path ${candidate} ${restoredRegistration ? 'is' : 'is not'} registered; quarantine path ${quarantine} ${quarantineRegistration ? 'is' : 'is not'} registered`)
+      if (restoredRegistration.locked !== INITIAL_REGISTRATION_LOCK_REASON) return failRestore(`restored worktree registration lock changed: ${restoredRegistration.locked || '<missing>'} != ${INITIAL_REGISTRATION_LOCK_REASON}`)
+      let restoredRealPath
+      try {
+        restoredRealPath = await fs.realpath(candidate)
+      } catch (error) {
+        return failRestore(`restored worktree path could not be resolved: ${errorText(error)}`)
+      }
+      if (restoredRealPath !== realCandidate) return failRestore(`restored worktree path changed: ${restoredRealPath} != ${realCandidate}`)
+      try {
+        await fs.lstat(quarantine)
+        return failRestore(`quarantine path remains after restore: ${quarantine}`)
+      } catch (error) {
+        if (processErrorCode(error) !== 'ENOENT') return failRestore(`quarantine path could not be verified after restore: ${errorText(error)}`)
+      }
+      const registration = await captureWorktreeRegistrationIdentity(candidate)
+      const registrationError = registrationIdentityMismatch(registrationBeforeQuarantine, registration, 'restored worktree registration')
+      if (registrationError) return failRestore(registrationError)
+      const restoredHead = git(candidate, ['rev-parse', '--verify', 'HEAD'])
+      const restoredBranch = git(candidate, ['symbolic-ref', '-q', 'HEAD'])
+      const branchHead = git(realRepo, ['rev-parse', '--verify', item.branchRef])
+      if (!restoredHead.ok || restoredHead.stdout.trim() !== item.head) return failRestore(`restored worktree HEAD mismatch: ${restoredHead.ok ? restoredHead.stdout.trim() : restoredHead.stderr.trim()} != ${item.head}`)
+      if (!restoredBranch.ok || restoredBranch.stdout.trim() !== item.branchRef) return failRestore(`restored worktree branch mismatch: ${restoredBranch.ok ? restoredBranch.stdout.trim() : restoredBranch.stderr.trim()} != ${item.branchRef}`)
+      if (!branchHead.ok || branchHead.stdout.trim() !== item.head) return failRestore(`restored branch ref mismatch: ${branchHead.ok ? branchHead.stdout.trim() : branchHead.stderr.trim()} != ${item.head}`)
+      return { ok: true, stderr: '' }
+    }
     const quarantinedHead = git(quarantine, ['rev-parse', '--verify', 'HEAD'])
     const quarantinedBranch = git(quarantine, ['symbolic-ref', '-q', 'HEAD'])
     const registrationAfterQuarantine = await captureWorktreeRegistrationIdentity(quarantine)
     const registrationAfterQuarantineError = registrationIdentityMismatch(registrationBeforeQuarantine, registrationAfterQuarantine, 'quarantine worktree registration')
     if (!quarantinedHead.ok || quarantinedHead.stdout.trim() !== item.head || !quarantinedBranch.ok || quarantinedBranch.stdout.trim() !== item.branchRef || registrationAfterQuarantineError) {
-      if (registrationAfterQuarantineError) registrationFenceFailure = true
-      const restored = registrationAfterQuarantineError ? { ok: false, stderr: `quarantine retained: ${registrationAfterQuarantineError}` } : restoreQuarantine()
+      if (registrationAfterQuarantineError) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+      }
+      const restored = registrationAfterQuarantineError ? { ok: false, stderr: `quarantine retained: ${registrationAfterQuarantineError}` } : await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: registrationAfterQuarantineError ? 'worktree-registration-changed-after-quarantine' : 'worktree-head-or-branch-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
+      continue
+    }
+    const processUsageAfterQuarantine = await processUsesWorktree(quarantine)
+    if (!processUsageAfterQuarantine.ok || processUsageAfterQuarantine.used) {
+      const processReason = processUsageAfterQuarantine.ok ? 'worktree-in-use' : 'worktree-process-check-unavailable'
+      const processDetail = processUsageAfterQuarantine.ok
+        ? `pid ${processUsageAfterQuarantine.pid} uses ${processUsageAfterQuarantine.location}`
+        : processUsageAfterQuarantine.error
+      const processFailure = { action: 'skip', reason: processReason, detail: processDetail, next_action: processNextAction(processReason) }
+      const restored = await restoreQuarantine()
+      if (!restored.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: 'worktree-process-check-failed', detail: `${processFailure.detail}; quarantine restore failed: ${restored.stderr.trim()}`, next_action: processNextAction('worktree-process-check-failed'), evidence })
+      } else {
+        results.push({ ...base, ...processFailure, evidence })
+      }
       continue
     }
     const statusBeforeRemove = git(quarantine, ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
     if (!statusBeforeRemove.ok) {
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'status-recheck-failed-before-remove', detail: `${statusBeforeRemove.stderr.trim()}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
     if (statusBeforeRemove.stdout.length > 0) {
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'worktree-became-dirty-before-remove', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
     const ignoredAfterQuarantine = ignoredFiles(quarantine)
     if (!ignoredAfterQuarantine.ok) {
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({
         ...base,
         action: 'error',
@@ -1657,27 +2011,44 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     const quarantineFenceLost = !registeredAfterQuarantine || registeredAfterQuarantine.locked !== INITIAL_REGISTRATION_LOCK_REASON || realQuarantineAfterQuarantine !== path.resolve(quarantine) || !isWithin(realQuarantineAfterQuarantine, realAllowedRoot)
     if (!statusAfterQuarantine.ok || statusAfterQuarantine.stdout.length > 0 || !headAfterQuarantine.ok || headAfterQuarantine.stdout.trim() !== item.head || !branchAfterQuarantine.ok || branchAfterQuarantine.stdout.trim() !== item.branchRef || !refAfterQuarantine.ok || refAfterQuarantine.stdout.trim() !== item.head || !defaultAfterQuarantine.ok || defaultAfterQuarantine.stdout.trim() !== defaultHead || quarantineFenceLost) {
       if (quarantineFenceLost) registrationFenceFailure = true
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'worktree-state-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
     const remoteAfterQuarantine = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
     if (!remoteAfterQuarantine.ok || remoteAfterQuarantine.oid !== defaultHead) {
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'remote-default-changed-after-quarantine', detail: `${remoteAfterQuarantine.ok ? `${remoteAfterQuarantine.oid} != ${defaultHead}` : remoteAfterQuarantine.error}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
     const mergeEvidenceStillValid = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
     if (!mergeEvidenceStillValid) {
-      const restored = restoreQuarantine()
+      const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
     if (ignoredFilesPresent) {
+      const processUsageBeforeClean = await processUsesWorktree(quarantine)
+      if (!processUsageBeforeClean.ok || processUsageBeforeClean.used) {
+        const processReason = processUsageBeforeClean.ok ? 'worktree-in-use' : 'worktree-process-check-unavailable'
+        const processDetail = processUsageBeforeClean.ok
+          ? `pid ${processUsageBeforeClean.pid} uses ${processUsageBeforeClean.location}`
+          : processUsageBeforeClean.error
+        const processFailure = { action: 'skip', reason: processReason, detail: processDetail, next_action: processNextAction(processReason) }
+        const restored = await restoreQuarantine()
+        if (!restored.ok) {
+          initialFence.retain = true
+          registrationFenceFailure = true
+          results.push({ ...base, action: 'error', reason: 'worktree-process-check-failed', detail: `${processFailure.detail}; quarantine restore failed: ${restored.stderr.trim()}`, next_action: processNextAction('worktree-process-check-failed'), evidence })
+        } else {
+          results.push({ ...base, ...processFailure, evidence })
+        }
+        continue
+      }
       const cleanArgs = ['clean', '-ffdX']
       const cleaned = git(quarantine, cleanArgs)
       if (!cleaned.ok) {
-        const restored = restoreQuarantine()
+        const restored = await restoreQuarantine()
         results.push({
           ...base,
           action: 'error',
@@ -1691,7 +2062,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       const ignoredAfterClean = ignoredFiles(quarantine)
       const statusAfterClean = git(quarantine, ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
       if (!ignoredAfterClean.ok || ignoredAfterClean.stdout.length > 0 || !statusAfterClean.ok || statusAfterClean.stdout.length > 0) {
-        const restored = restoreQuarantine()
+        const restored = await restoreQuarantine()
         const cleanVerification = !ignoredAfterClean.ok
           ? commandDiagnostic('git', ['-C', quarantine, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredAfterClean)
           : !statusAfterClean.ok
@@ -1737,7 +2108,7 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       if (!remoteAfterClean.ok || remoteAfterClean.oid !== defaultHead) postCleanIssues.push(remoteAfterClean.ok ? `remote default changed after ignored cleanup: ${remoteAfterClean.oid} != ${defaultHead}` : remoteAfterClean.error)
       if (!mergeEvidenceAfterClean) postCleanIssues.push('merge evidence is no longer valid after ignored cleanup')
       if (postCleanIssues.length > 0) {
-        const restored = restoreQuarantine()
+        const restored = await restoreQuarantine()
         results.push({
           ...base,
           action: 'error',
@@ -1759,6 +2130,22 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
       if (!identity.ok) {
         const released = await contentLocks.release()
         return { ok: false, reason: 'worktree-identity-changed-before-remove', error: `${identity.error}${released.ok ? '' : `; content lock release failed: ${released.error}`}` }
+      }
+      const processUsageBeforeRemove = await processUsesWorktree(quarantine)
+      if (!processUsageBeforeRemove.ok || processUsageBeforeRemove.used) {
+        const processDetail = processUsageBeforeRemove.ok
+          ? `pid ${processUsageBeforeRemove.pid} uses ${processUsageBeforeRemove.location}`
+          : processUsageBeforeRemove.error
+        const released = await contentLocks.release()
+        if (!released.ok) {
+          initialFence.retain = true
+          return { ok: false, reason: 'worktree-content-lock-release-failed', error: `${processDetail}; content lock release failed: ${released.error}` }
+        }
+        return {
+          ok: false,
+          reason: processUsageBeforeRemove.ok ? 'worktree-in-use' : 'worktree-process-check-unavailable',
+          error: processDetail,
+        }
       }
       const removeArgs = ['worktree', 'remove', '-f', '-f', quarantine]
       const removed = git(realRepo, removeArgs)
@@ -1798,6 +2185,17 @@ async function inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch
     }
     const branchSafety = await deleteLocalBranchSafely(realRepo, headLockRecords, item.branchRef, item.head, defaultInfo.ref, defaultHead, evidence, quarantine, beforeCommit)
     if (!branchSafety.ok) {
+      if (branchSafety.reason === 'worktree-in-use' || branchSafety.reason === 'worktree-process-check-unavailable') {
+        const restored = await restoreQuarantine()
+        if (!restored.ok) {
+          initialFence.retain = true
+          registrationFenceFailure = true
+          results.push({ ...base, action: 'error', reason: 'worktree-process-check-failed', detail: `${branchSafety.detail}; quarantine restore failed: ${restored.stderr.trim()}`, next_action: processNextAction('worktree-process-check-failed'), evidence, branch_delete_method: branchSafety.branch_delete_method })
+        } else {
+          results.push({ ...base, action: 'skip', reason: branchSafety.reason, detail: branchSafety.detail, next_action: processNextAction(branchSafety.reason), evidence, branch_delete_method: branchSafety.branch_delete_method })
+        }
+        continue
+      }
       if (branchSafety.reason.startsWith('worktree-')) registrationFenceFailure = true
       results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
       continue
@@ -1919,6 +2317,7 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
 function resultTarget(item) {
   if (item.path) return item.path
   if (item.target === 'branch') return `${item.repo} (branch ${item.branch})`
+  if (item.target === 'remote-tracking-ref') return `${item.repo} (${item.branch})`
   return item.repo
 }
 
@@ -1933,12 +2332,23 @@ function hasDirtyConflict(item: { dirty_status?: string }) {
 
 function cronCause(item) {
   if (isDefaultBranchWorktreeDirty(item)) return 'default branchのworktreeに未コミットの変更または未追跡ファイルがあります'
+  if (item.reason === 'stale-origin-tracking-ref') return 'origin上で削除済みのbranchに対応するlocal tracking refです'
   if (item.reason === 'dirty') return '対象worktreeに未commit変更があります'
   if (item.reason === 'locked') return `対象worktreeがロックされています${item.detail ? `: ${item.detail}` : ''}`
   return item.detail ? item.detail.replaceAll(/\s+/g, ' ').trim() : '詳細情報はありません'
 }
 
+function processNextAction(reason: string) {
+  if (reason === 'worktree-process-check-unavailable') return '対象processが終了するか確認可能な状態になってから再実行してください'
+  if (reason === 'worktree-in-use') return '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください'
+  if (reason === 'worktree-process-check-failed') return 'quarantine pathとworktree registrationを確認し、安全な復旧手順を判断してください'
+  return null
+}
+
 function cronNextStep(item) {
+  if (item.reason === 'worktree-process-check-unavailable') return `processの使用状況を確認できなかったため削除をskipしました。${processNextAction(item.reason)}`
+  if (item.reason === 'worktree-in-use') return processNextAction(item.reason)
+  if (item.reason === 'worktree-process-check-failed') return processNextAction(item.reason)
   if (isDefaultBranchWorktreeDirty(item)) {
     if (hasDirtyConflict(item)) return '競合を解消するか、進行中のmergeまたはrebaseをabortしてから、必要な変更をcommitまたは退避し、worktreeをcleanにして再実行してください'
     return '検出された変更内容を確認し、不要なキャッシュや生成物はリポジトリ外へ移動または削除し、必要な変更はcommitまたは退避して、worktreeをcleanにしてから再実行してください'
@@ -1952,7 +2362,7 @@ function cronNextStep(item) {
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'default-branch-dirty', 'dirty', 'locked', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const importantReasons = new Set(['empty-repository', 'prunable', 'stale-origin-tracking-ref', 'origin-tracking-ref-prune-query-failed', 'origin-tracking-ref-prune-failed', 'origin-tracking-ref-prune-readback-failed', 'default-branch-dirty', 'dirty', 'locked', 'worktree-in-use', 'worktree-process-check-unavailable', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || item.severity === 'warn' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
   const lines = ['## merged worktree cleanup']
@@ -1965,15 +2375,16 @@ function renderCron(summary) {
       : ''
     const action = item.severity === 'warn' ? 'warn' : item.action
     lines.push(`- ${action}: ${target} — ${item.reason}${evidence}${detail}${ignored}`)
-    if (item.action === 'error' || item.severity === 'warn') {
+    if (item.action === 'error' || item.severity === 'warn' || item.reason === 'worktree-process-check-unavailable' || item.reason === 'worktree-in-use') {
       lines.push(`  原因: ${cronCause(item)}`)
       if (isDefaultBranchWorktreeDirty(item)) lines.push(`  検出: ${item.dirty_status || '変更内容を読み取れませんでした'}`)
       const nextStep = cronNextStep(item)
       if (nextStep) lines.push(`  対応: ${nextStep}`)
     }
   }
-  const pruneSummary = summary.mode === 'dry-run' ? `prune予定: ${summary.would_prune}` : `prune済み: ${summary.pruned}`
-  lines.push('', `削除: ${summary.deleted} / ${pruneSummary} / 警告: ${summary.warnings} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item) => item.action === 'skip').length}`)
+  const worktreePruneSummary = summary.mode === 'dry-run' ? `stale worktree metadata prune予定: ${summary.would_prune}` : `stale worktree metadata prune済み: ${summary.pruned}`
+  const originPruneSummary = summary.mode === 'dry-run' ? `origin tracking refs prune予定: ${summary.would_prune_origin_tracking_refs}` : `origin tracking refs prune済み: ${summary.origin_tracking_refs_pruned}`
+  lines.push('', `worktree削除: ${summary.deleted} / ${worktreePruneSummary} / ${originPruneSummary} / 警告: ${summary.warnings} / エラー: ${summary.errors} / 要確認skip: ${report.filter((item: { action: string }) => item.action === 'skip').length}`)
   return `${lines.join('\n')}\n`
 }
 
@@ -2003,16 +2414,21 @@ async function main() {
 
   const repos = await discoverRepos(root, explicitRepos)
   const results: Array<{ action: string; reason?: string; repo?: string; path?: string; severity?: string; [key: string]: unknown }> = []
-  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch))
+  const managedRoot = values.root || config.configuredRoot || null
+  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch, managedRoot))
   const summary = {
     mode: apply ? 'apply' : 'dry-run',
     root,
     repositories_checked: repos.length,
     candidates: results.length,
     deleted: results.filter((item) => item.action === 'deleted').length,
-    pruned: results.filter((item) => item.action === 'pruned').length,
+    pruned: results.filter((item) => item.action === 'pruned' && item.target !== 'remote-tracking-ref').length,
     would_delete: results.filter((item) => item.action === 'would-delete').length,
-    would_prune: results.filter((item) => item.action === 'would-prune').length,
+    would_prune: results.filter((item) => item.action === 'would-prune' && item.target !== 'remote-tracking-ref').length,
+    origin_tracking_refs_pruned: results.filter((item) => item.action === 'pruned' && item.target === 'remote-tracking-ref').length,
+    would_prune_origin_tracking_refs: results.filter((item) => item.action === 'would-prune' && item.target === 'remote-tracking-ref').length,
+    pruned_remote_refs: results.filter((item) => item.action === 'pruned' && item.target === 'remote-tracking-ref').length,
+    would_prune_remote_refs: results.filter((item) => item.action === 'would-prune' && item.target === 'remote-tracking-ref').length,
     skipped: results.filter((item) => item.action === 'skip').length,
     warnings: results.filter((item) => 'severity' in item && item.severity === 'warn').length,
     errors: results.filter((item) => item.action === 'error').length,
@@ -2021,7 +2437,7 @@ async function main() {
   if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`)
   else if (cron) process.stdout.write(renderCron(summary))
   else {
-    process.stdout.write(`Merged worktree cleanup (${summary.mode}): ${summary.repositories_checked} repos, ${summary.deleted} deleted, ${summary.would_delete} would delete, ${summary.errors} errors\n`)
+    process.stdout.write(`Merged worktree cleanup (${summary.mode}): ${summary.repositories_checked} repos, ${summary.deleted} worktrees deleted, ${summary.origin_tracking_refs_pruned} origin tracking refs pruned, ${summary.would_delete} would delete, ${summary.would_prune_origin_tracking_refs} origin refs would prune, ${summary.errors} errors\n`)
     for (const item of results) process.stdout.write(`${item.action.toUpperCase()} ${resultTarget(item)}: ${item.reason}\n`)
   }
   process.exitCode = summary.errors > 0 ? 1 : 0
