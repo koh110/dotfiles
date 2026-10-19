@@ -69,6 +69,9 @@ Dockerfile内でnpmを利用する場合は、`npm install` の前に `.npmrc` �
 RUN npm install --min-release-age=7
 ```
 
+- `min-release-age-exclude` を使う場合は npm 11.17.0 以降を要求する（同設定が追加されたバージョン）
+- `omit-lockfile-registry-resolved=true` と併用する前に、npm/cli#9715 の修正が利用する npm リリースに含まれていることと、`npm ci` の回帰テストを確認する。少なくとも npm 11.19.1 / 12.2.0 では、lockfile から `resolved` が省略されると、除外対象でも `npm ci` が `ETARGET` になることを確認した。修正が未収録ならこの組み合わせを避け、`resolved` を保持する lockfile で確認する
+
 ## Linked Worktree and npm Workspace Verification
 
 - linked worktreeには`node_modules`が伴わないことがある。npm script、`npx`、wrangler等を実行する前に`node_modules/.bin`または対象binaryの実在を確認する
