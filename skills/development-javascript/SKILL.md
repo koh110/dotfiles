@@ -123,6 +123,8 @@ RUN npm install --min-release-age=7
   - 外部ライブラリの型定義が不完全な場合のみ、コメントで理由を明記した上で使用を許可する
 - TypeScriptファイルを直接実行する場合はNode.jsのstrip-typesを利用する
   - `ts-node`, `tsx` の利用を禁じる
+  - Node.jsのnative type strippingは`tsconfig.json`を読まず標準のmodule resolverで実行するため、相対TypeScript importには `.ts` 拡張子を明示する。type-check用tsconfigは `noEmit: true` と `allowImportingTsExtensions: true` を組み合わせる
+  - type strippingはNode.js v22.6.0で追加され、v22.18.0から既定で有効。`--experimental-strip-types`等を使う場合はCI・package enginesの最低Node.js versionを照合してから移行する
   - ref: https://nodejs.org/docs/api/typescript.html
 - Array.prototype.filterではできる限り型推論に任せ `is` を利用しない
 
