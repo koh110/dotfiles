@@ -7,21 +7,29 @@ import path from 'node:path'
 import process from 'node:process'
 import { parseArgs } from 'node:util'
 import { loadCleanMergedBranchesConfig } from './clean-merged-branches-config.ts'
+import { aggregatePatchEquivalence as checkAggregatePatchEquivalence } from './aggregate-patch-equivalence.ts'
 
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, merged, unlocked linked worktrees under GIT_REPOSITORIES_ROOT are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, merged, unlocked linked worktrees under GIT_REPOSITORIES_ROOT are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
 }
 
-function run(command, args, options = {}) {
+type RunOptions = {
+  cwd?: string
+  timeout?: number
+  input?: string
+  env?: Record<string, string | undefined>
+}
+
+function run(command: string, args: string[], options: RunOptions = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeout || (command === 'gh' ? 60_000 : 30_000),
     killSignal: 'SIGKILL',
-    env: config.environment,
+    env: options.env ? { ...config.environment, ...options.env } : config.environment,
     input: options.input
   })
   return {
@@ -33,7 +41,7 @@ function run(command, args, options = {}) {
   }
 }
 
-function git(repo, args, options = {}) {
+function git(repo: string, args: string[], options: RunOptions = {}) {
   return run('git', ['-C', repo, ...args], options)
 }
 
@@ -292,6 +300,15 @@ function mergeEvidenceError(repo: string, branchRef: string, expectedHead: strin
     if (!patch.ok) return patch.error || 'git cherry patch-equivalence query failed'
     return patch.merged ? null : `${branchRef}@${expectedHead} is no longer patch-equivalent to ${defaultRef}`
   }
+  if (evidence.method === 'aggregate-patch-equivalence') {
+    const patch = checkAggregatePatchEquivalence(repo, expectedHead, defaultRef, git)
+    if (!patch.ok) return patch.error || 'aggregate patch-equivalence query failed'
+    if (!patch.merged) return `${branchRef}@${expectedHead} aggregate patch is no longer present in ${defaultRef}`
+    if (patch.merge_base !== evidence.merge_base || patch.commit_count !== evidence.commit_count || patch.changed_path_count !== evidence.changed_path_count) {
+      return `${branchRef}@${expectedHead} aggregate patch evidence changed before deletion`
+    }
+    return null
+  }
   return `unsupported merge evidence for ${branchRef}: ${evidence.method || '<missing>'}`
 }
 
@@ -305,7 +322,9 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
     ? 'git-update-ref-transaction-cas-with-ancestry-evidence'
     : evidence.method === 'patch-equivalence'
       ? 'git-update-ref-transaction-cas-with-patch-equivalence-evidence'
-      : 'git-update-ref-transaction-cas-with-merge-evidence'
+      : evidence.method === 'aggregate-patch-equivalence'
+        ? 'git-update-ref-transaction-cas-with-aggregate-patch-equivalence-evidence'
+        : 'git-update-ref-transaction-cas-with-merge-evidence'
   const headLocks = await acquireWorktreeHeadLocks(worktreeRecords)
   if (!headLocks.ok) return { ok: false, reason: 'worktree-head-lock-failed', detail: headLocks.error, branch_delete_method: branchDeleteMethod }
   let outcome = { ok: false, reason: 'branch-delete-failed', detail: 'branch deletion did not run', branch_delete_method: branchDeleteMethod }
@@ -1571,7 +1590,19 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
   }
 
   const patch = patchEquivalence(repo, head, defaultRef)
-  if (patch.ok && patch.merged) {
+  if (!patch.ok) {
+    if (!pr.ok) {
+      return {
+        ok: false,
+        code: 'patch-equivalence-query-failed',
+        error: `${patch.error}; PR evidence unavailable: ${pr.error}`,
+        repository: pr.repository,
+        pr_error: { code: pr.code, detail: pr.error },
+      }
+    }
+    return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error }
+  }
+  if (patch.merged) {
     return {
       ok: true,
       evidence: {
@@ -1582,19 +1613,35 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
       },
     }
   }
-  if (!pr.ok) {
-    if (!patch.ok) {
+
+  const aggregate = checkAggregatePatchEquivalence(repo, head, defaultRef, git)
+  if (!aggregate.ok) {
+    const error = !aggregate.error ? 'aggregate patch-equivalence query failed' : aggregate.error
+    if (!pr.ok) {
       return {
         ok: false,
-        code: 'patch-equivalence-query-failed',
-        error: `${patch.error}; PR evidence unavailable: ${pr.error}`,
+        code: 'aggregate-patch-equivalence-query-failed',
+        error: `${error}; PR evidence unavailable: ${pr.error}`,
         repository: pr.repository,
         pr_error: { code: pr.code, detail: pr.error },
       }
     }
-    return pr
+    return { ok: false, code: 'aggregate-patch-equivalence-query-failed', error }
   }
-  if (!patch.ok) return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error }
+  if (aggregate.merged) {
+    return {
+      ok: true,
+      evidence: {
+        method: 'aggregate-patch-equivalence',
+        default_ref: defaultRef,
+        default_head: defaultHead,
+        merge_base: aggregate.merge_base,
+        commit_count: aggregate.commit_count,
+        changed_path_count: aggregate.changed_path_count,
+      },
+    }
+  }
+  if (!pr.ok) return pr
   return { ok: true, evidence: null }
 }
 
@@ -1813,7 +1860,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
 
-    const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head, defaultInfo.ref]).ok
+    const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
     let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
     if (!evidence) {
       const resolved = resolveMergeEvidence(realRepo, base.branch || '', item.head || '', defaultInfo.ref, defaultHead, mergedPrEvidence)
@@ -1854,6 +1901,13 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       const patchError = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (patchError) {
         results.push({ ...base, action: 'error', reason: 'patch-equivalence-changed-before-remove', detail: patchError, evidence })
+        continue
+      }
+    }
+    if (evidence.method === 'aggregate-patch-equivalence') {
+      const patchError = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      if (patchError) {
+        results.push({ ...base, action: 'error', reason: 'aggregate-patch-equivalence-changed-before-remove', detail: patchError, evidence })
         continue
       }
     }
@@ -1927,7 +1981,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       if (registrationError) return failRestore(registrationError)
       const restoredHead = git(candidate, ['rev-parse', '--verify', 'HEAD'])
       const restoredBranch = git(candidate, ['symbolic-ref', '-q', 'HEAD'])
-      const branchHead = git(realRepo, ['rev-parse', '--verify', item.branchRef])
+      const branchHead = git(realRepo, ['rev-parse', '--verify', item.branchRef || ''])
       if (!restoredHead.ok || restoredHead.stdout.trim() !== item.head) return failRestore(`restored worktree HEAD mismatch: ${restoredHead.ok ? restoredHead.stdout.trim() : restoredHead.stderr.trim()} != ${item.head}`)
       if (!restoredBranch.ok || restoredBranch.stdout.trim() !== item.branchRef) return failRestore(`restored worktree branch mismatch: ${restoredBranch.ok ? restoredBranch.stdout.trim() : restoredBranch.stderr.trim()} != ${item.branchRef}`)
       if (!branchHead.ok || branchHead.stdout.trim() !== item.head) return failRestore(`restored branch ref mismatch: ${branchHead.ok ? branchHead.stdout.trim() : branchHead.stderr.trim()} != ${item.head}`)
@@ -2236,9 +2290,10 @@ function hasUnattachedLocalBranches(repo, worktrees) {
 
 // Local branches that are not checked out in any worktree follow the same merge policy as
 // worktree candidates: the tip is an ancestor of the default branch, is an ancestor of a
-// merged GitHub PR head with a reachable merge commit, or is patch-equivalent to the default
-// branch. Branches that were attached to a worktree at the start of this run are handled (or kept)
-// by the worktree pass and are not reconsidered here.
+// merged GitHub PR head with a reachable merge commit, has all commits patch-equivalent to the
+// default branch, or has its complete aggregate net patch from the merge base in the default tree.
+// Branches that were attached to a worktree at the start of this run are handled (or kept) by the
+// worktree pass and are not reconsidered here.
 async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explicitDefaultBranch: any, defaultInfo: any, defaultHead: any, worktreeBranchRefs: any, mergedPrEvidence: any, initialBranchHeads: any) {
   const results: any[] = []
   const listed = listLocalBranches(realRepo)
@@ -2260,7 +2315,7 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
     if (!evidence) {
       const resolved = resolveMergeEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, mergedPrEvidence)
       if (!resolved.ok) {
-        if (resolved.code === 'patch-equivalence-query-failed') {
+        if (resolved.code === 'patch-equivalence-query-failed' || resolved.code === 'aggregate-patch-equivalence-query-failed') {
           results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
         } else {
           // Without merge evidence the branch is kept. Unattached branches are often local work or
@@ -2362,7 +2417,7 @@ function cronNextStep(item) {
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'stale-origin-tracking-ref', 'origin-tracking-ref-prune-query-failed', 'origin-tracking-ref-prune-failed', 'origin-tracking-ref-prune-readback-failed', 'default-branch-dirty', 'dirty', 'locked', 'worktree-in-use', 'worktree-process-check-unavailable', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const importantReasons = new Set(['empty-repository', 'prunable', 'stale-origin-tracking-ref', 'origin-tracking-ref-prune-query-failed', 'origin-tracking-ref-prune-failed', 'origin-tracking-ref-prune-readback-failed', 'default-branch-dirty', 'dirty', 'locked', 'worktree-in-use', 'worktree-process-check-unavailable', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'aggregate-patch-equivalence-query-failed', 'aggregate-patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || item.severity === 'warn' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
   const lines = ['## merged worktree cleanup']
