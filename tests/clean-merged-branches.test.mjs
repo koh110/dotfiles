@@ -624,6 +624,84 @@ test('deletes a clean squash-merged worktree without PR evidence', async () => {
   }
 })
 
+test('deletes a clean multi-commit squash-merged worktree using aggregate patch evidence', async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-aggregate-patch-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+    git(worktree, ['add', 'feature-2.txt'])
+    git(worktree, ['commit', '-qm', 'feature 2'])
+    squashMergeCandidateIntoMain(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, [])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    if (summary.results.some((item) => item.reason === 'worktree-process-check-unavailable')) {
+      t.skip('Host /proc permissions prevent the cleanup process-use safety check')
+      return
+    }
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].evidence.method, 'aggregate-patch-equivalence')
+    assert.equal(summary.results[0].evidence.commit_count, 2)
+    assert.equal(summary.results[0].evidence.changed_path_count, 2)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a multi-commit branch when only part of its squash delta is in the default branch', async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-partial-aggregate-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const firstCommit = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+    git(worktree, ['add', 'feature-2.txt'])
+    git(worktree, ['commit', '-qm', 'feature 2'])
+    git(repo, ['cherry-pick', '--no-commit', firstCommit])
+    git(repo, ['commit', '-qm', 'partial backport'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, [])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    if (summary.results.some((item) => item.reason === 'worktree-process-check-unavailable')) {
+      t.skip('Host /proc permissions prevent the cleanup process-use safety check')
+      return
+    }
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].action, 'skip')
+    assert.equal(summary.results[0].reason, 'merge-evidence-not-found')
+    git(repo, ['rev-parse', '--verify', 'refs/heads/feature'])
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, /branch refs\/heads\/feature/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
 test('rejects malformed git cherry output before deleting a worktree', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-malformed-cherry-'))
   try {
@@ -2414,10 +2492,13 @@ test('deletes merged local branches that have no worktree and skips unmerged one
   }
 })
 
-test('deletes squash-merged unattached branches without PR evidence', async () => {
+test('deletes multi-commit squash-merged unattached branches using aggregate patch evidence without PR evidence', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unattached-patch-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot, 'git.example.invalid')
+    await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+    git(worktree, ['add', 'feature-2.txt'])
+    git(worktree, ['commit', '-qm', 'feature 2'])
     squashMergeCandidateIntoMain(repo)
     git(repo, ['worktree', 'remove', worktree])
 
@@ -2430,9 +2511,10 @@ test('deletes squash-merged unattached branches without PR evidence', async () =
     assert.equal(summary.deleted, 1)
     assert.equal(summary.errors, 0)
     assert.equal(summary.results[0].target, 'branch')
-    assert.equal(summary.results[0].evidence.method, 'patch-equivalence')
-    assert.equal(summary.results[0].evidence.commit_count, 1)
-    assert.equal(summary.results[0].branch_delete_method, 'git-update-ref-transaction-cas-with-patch-equivalence-evidence')
+    assert.equal(summary.results[0].evidence.method, 'aggregate-patch-equivalence')
+    assert.equal(summary.results[0].evidence.commit_count, 2)
+    assert.equal(summary.results[0].evidence.changed_path_count, 2)
+    assert.equal(summary.results[0].branch_delete_method, 'git-update-ref-transaction-cas-with-aggregate-patch-equivalence-evidence')
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
