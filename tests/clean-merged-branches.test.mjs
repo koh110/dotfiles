@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { access, chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync, spawn } from 'node:child_process'
 import os from 'node:os'
@@ -9,11 +9,29 @@ import test from 'node:test'
 const root = path.resolve(import.meta.dirname, '..')
 const entrypoint = path.join(root, 'bin', 'clean-merged-branches.sh')
 const cronEntrypoint = path.join(root, 'bin', 'clean-merged-branches-cron.sh')
+const defaultGhBin = path.join(os.tmpdir(), `clean-merged-branches-gh-${process.pid}`)
+const defaultGh = path.join(defaultGhBin, 'gh')
+mkdirSync(defaultGhBin, { recursive: true })
+writeFileSync(defaultGh, "#!/bin/sh\nprintf '%s\\n' '[]'\n")
+chmodSync(defaultGh, 0o755)
 
 function run(command, args, options = {}) {
   const { env, clearEnv = [], ...spawnOptions } = options
   const childEnv = { ...process.env, ...env }
   for (const name of clearEnv) delete childEnv[name]
+  if (!clearEnv.includes('PATH')) {
+    const inheritedPath = process.env.PATH || ''
+    const hasConfiguredPath = env && Object.hasOwn(env, 'PATH')
+    const configuredPath = hasConfiguredPath ? env.PATH || '' : inheritedPath
+    if (!hasConfiguredPath || configuredPath === inheritedPath) {
+      childEnv.PATH = [defaultGhBin, inheritedPath].filter(Boolean).join(path.delimiter)
+    } else if (inheritedPath && configuredPath.endsWith(`${path.delimiter}${inheritedPath}`)) {
+      const customPath = configuredPath.slice(0, -(inheritedPath.length + path.delimiter.length))
+      childEnv.PATH = [customPath, defaultGhBin, inheritedPath].filter(Boolean).join(path.delimiter)
+    } else {
+      childEnv.PATH = [configuredPath, defaultGhBin].filter(Boolean).join(path.delimiter)
+    }
+  }
   return spawnSync(command, args, {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
@@ -93,7 +111,7 @@ function mergeRemoteWithoutRefreshingLocalDefault(repo) {
   return { base }
 }
 
-async function installProcessInjectionTools(fixtureRoot, candidate, stage, failRestore = false) {
+async function installProcessInjectionTools(fixtureRoot, candidate, stage, failRestore = false, recoveryRef = '') {
   const fakeBin = path.join(fixtureRoot, 'bin')
   const pidFile = path.join(fixtureRoot, 'injected-process.pid')
   const fakeDocker = path.join(fakeBin, 'docker')
@@ -128,9 +146,15 @@ if [ "$CLEANUP_TEST_STAGE" = "before-remove" ] && [ "$1" = "-C" ] && [ "$3" = "u
     break
   done
 fi
+if [ "$CLEANUP_TEST_STAGE" = "before-recovery-ref-prepare" ] && [ "$1" = "-C" ] && [ "$3" = "update-ref" ] && [ "$4" = "--stdin" ]; then
+  "$CLEANUP_TEST_REAL_GIT" -C "$2" update-ref -d "$CLEANUP_TEST_RECOVERY_REF" || exit 98
+fi
 "$CLEANUP_TEST_REAL_GIT" "$@"
 result=$?
 if [ "$result" -ne 0 ]; then exit "$result"; fi
+if [ "$CLEANUP_TEST_STAGE" = "after-quarantine-drop-recovery-ref" ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "move" ] && [ "$7" = "$CLEANUP_TEST_CANDIDATE" ]; then
+  "$CLEANUP_TEST_REAL_GIT" -C "$2" update-ref -d "$CLEANUP_TEST_RECOVERY_REF" || exit 98
+fi
 if [ "$CLEANUP_TEST_STAGE" = "after-quarantine" ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "move" ] && [ "$7" = "$CLEANUP_TEST_CANDIDATE" ]; then
   case "$8" in "$CLEANUP_TEST_ROOT"/.cleanup-repo-feature-*) start_process "$8" ;; esac
 fi
@@ -152,6 +176,7 @@ exit "$result"
         CLEANUP_TEST_PID_FILE: pidFile,
         CLEANUP_TEST_REAL_GIT: realGit,
         CLEANUP_TEST_ROOT: fixtureRoot,
+        CLEANUP_TEST_RECOVERY_REF: recoveryRef,
         CLEANUP_TEST_PROCESS_EXECUTABLE: processExecutable,
         CLEANUP_TEST_STAGE: stage,
       },
@@ -672,7 +697,7 @@ test('deletes a clean squash-merged worktree without PR evidence', async () => {
     assert.equal(summary.results[0].evidence.method, 'patch-equivalence')
     assert.equal(summary.results[0].evidence.commit_count, 1)
     assert.equal(summary.results[0].branch_delete_method, 'git-update-ref-transaction-cas-with-patch-equivalence-evidence')
-    assert.equal((await ghCalls(ghLog)).length, 1)
+    assert.equal((await ghCalls(ghLog)).length, 4)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
   } finally {
@@ -1809,7 +1834,7 @@ test('removes the local branch after a GitHub-confirmed squash merge', async () 
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","state":"MERGED","baseRefName":"main","headRepository":{"nameWithOwner":"owner/repo"},"mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -1883,7 +1908,7 @@ exec "$real_git" -C "$invoked_repo" "$@"
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","state":"MERGED","baseRefName":"main","headRepository":{"nameWithOwner":"owner/repo"},"mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -1924,7 +1949,7 @@ exit 1
 test('does not remove quarantine before update-ref prepare acknowledgement', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-prepare-race-'))
   try {
-    const { repo } = await makeRemoteCandidateRepo(fixtureRoot)
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
     squashMergeCandidateIntoMain(repo)
     const fakeBin = path.join(fixtureRoot, 'bin')
     await mkdir(fakeBin, { recursive: true })
@@ -1966,7 +1991,9 @@ exec "$real_git" -C "$repo" "$@"
     assert.equal(summary.errors, 1)
     assert.match(summary.results[0].detail, /prepare acknowledgement/)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
-    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, /\.cleanup-feature-/)
+    assert.equal(existsSync(worktree), true)
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+    assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, /\.cleanup-feature-/)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
@@ -2012,7 +2039,7 @@ exec "$real_git" -C "$repo" "$@"
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","state":"MERGED","baseRefName":"main","headRepository":{"nameWithOwner":"owner/repo"},"mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"${mergeCommit}"}}]'
   exit 0
 fi
 exit 1
@@ -2233,7 +2260,7 @@ test('rejects a GitHub mergeCommit ref instead of treating it as an object ID', 
     await writeFile(fakeGh, `#!/bin/sh
 set -eu
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"refs/heads/main"}}]'
+  printf '%s\\n' '[{"number":1,"url":"https://github.com/owner/repo/pull/1","state":"MERGED","baseRefName":"main","headRepository":{"nameWithOwner":"owner/repo"},"mergedAt":"2026-01-01T00:00:00Z","headRefName":"feature","headRefOid":"${head}","mergeCommit":{"oid":"refs/heads/main"}}]'
   exit 0
 fi
 exit 1
@@ -2474,14 +2501,41 @@ test('cron wrapper has a side-effect-free help path and rejects arguments', () =
   assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout || invalid.error || 'process did not start')
 })
 
-async function writeLoggingGh(fakeBin, logPath, pulls) {
+async function writeLoggingGh(fakeBin, logPath, pulls, headPulls = null) {
   const fakeGh = path.join(fakeBin, 'gh')
+  const normalizedPulls = pulls.map((pull) => ({
+    state: pull.state || (pull.mergedAt ? 'MERGED' : 'CLOSED'),
+    baseRefName: pull.baseRefName || 'main',
+    headRepository: pull.headRepository || { nameWithOwner: 'owner/repo' },
+    ...pull,
+  }))
+  const normalizedHeadPulls = (headPulls || pulls).map((pull) => ({
+    state: pull.state || (pull.mergedAt ? 'MERGED' : 'CLOSED'),
+    baseRefName: pull.baseRefName || 'main',
+    headRepository: pull.headRepository || { nameWithOwner: 'owner/repo' },
+    ...pull,
+  }))
+  const pullViews = normalizedPulls.map((pull) => `${pull.number}) printf '%s\\n' ${JSON.stringify(JSON.stringify(pull))} ;;`).join('\n')
   await writeFile(fakeGh, `#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' ${JSON.stringify(JSON.stringify(pulls))}
+  previous=
+  for argument in "$@"; do
+    if [ "$previous" = "--head" ]; then
+      printf '%s\\n' ${JSON.stringify(JSON.stringify(normalizedHeadPulls))}
+      exit 0
+    fi
+    previous=$argument
+  done
+  printf '%s\\n' ${JSON.stringify(JSON.stringify(normalizedPulls))}
   exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$3" in
+${pullViews}
+    *) exit 1 ;;
+  esac
 fi
 exit 1
 `)
@@ -2489,6 +2543,38 @@ exit 1
   const fakeDocker = path.join(fakeBin, 'docker')
   await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
   await chmod(fakeDocker, 0o755)
+}
+
+async function writeSequencedLoggingGh(fakeBin, logPath, pullSnapshots, eventLogPath = null) {
+  const normalizedSnapshots = pullSnapshots.map((pulls) => pulls.map((pull) => ({
+    state: pull.state || (pull.mergedAt ? 'MERGED' : 'CLOSED'),
+    baseRefName: pull.baseRefName || 'main',
+    headRepository: pull.headRepository || { nameWithOwner: 'owner/repo' },
+    ...pull,
+  })))
+  await writeLoggingGh(fakeBin, logPath, normalizedSnapshots[0] || [])
+  const fakeGh = path.join(fakeBin, 'gh')
+  const counterPath = `${logPath}.list-count`
+  const responseCases = normalizedSnapshots.map((pulls, index) => `${index + 1}) printf '%s\\n' ${JSON.stringify(JSON.stringify(pulls))} ;;`).join('\n')
+  const finalResponse = JSON.stringify(JSON.stringify(normalizedSnapshots.at(-1) || []))
+  const eventLogWrite = eventLogPath ? `printf 'gh %s\\n' "$*" >> ${JSON.stringify(eventLogPath)}` : ''
+  await writeFile(fakeGh, `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
+${eventLogWrite}
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -f ${JSON.stringify(counterPath)} ]; then IFS= read -r count < ${JSON.stringify(counterPath)}; else count=0; fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > ${JSON.stringify(counterPath)}
+  case "$count" in
+${responseCases}
+    *) printf '%s\\n' ${finalResponse} ;;
+  esac
+  exit 0
+fi
+exit 1
+`)
+  await chmod(fakeGh, 0o755)
 }
 
 async function ghCalls(logPath) {
@@ -2541,7 +2627,9 @@ test('deletes merged local branches that have no worktree and skips unmerged one
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/wip'])
     git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/checked-out'])
-    assert.equal((await ghCalls(ghLog)).length, 1)
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.length, 2)
+    assert.match(calls[1], /--head feature/)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
     await rm(outsideRoot, { recursive: true, force: true })
@@ -2681,17 +2769,18 @@ test('uses merged PR evidence when the local branch head is an ancestor of the P
     assert.equal(summary.results[0].evidence.method, 'github-merge-commit')
     assert.equal(summary.results[0].evidence.head_relation, 'ancestor')
     assert.equal(summary.results[0].evidence.pr_head, prHead)
-    assert.equal((await ghCalls(ghLog)).length, 1)
+    assert.equal((await ghCalls(ghLog)).length, 3)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }
 })
 
-test('resolves merged-PR evidence for every candidate with one gh call per repository', async () => {
+test('uses one repository PR batch and branch-specific rechecks for each deletion', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-gh-batch-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
     const featureHead = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['worktree', 'remove', worktree])
     git(repo, ['branch', 'other', 'main'])
     const otherWorktree = path.join(fixtureRoot, 'other-work')
     git(repo, ['worktree', 'add', '-q', otherWorktree, 'other'])
@@ -2723,13 +2812,666 @@ test('resolves merged-PR evidence for every candidate with one gh call per repos
     assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
     const summary = JSON.parse(result.stdout)
     assert.equal(summary.errors, 0)
-    assert.equal(summary.deleted, 2)
+    assert.equal(summary.deleted, 2, JSON.stringify(summary.results, null, 2))
     assert.deepEqual(summary.results.map((item) => [item.branch, item.action, item.evidence?.number]), [['feature', 'deleted', 1], ['other', 'deleted', 2]])
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/other']).status, 1)
     const calls = await ghCalls(ghLog)
-    assert.equal(calls.length, 1)
+    assert.equal(calls.length, 5)
     assert.doesNotMatch(calls[0], /--head/)
+    assert.equal(calls.slice(1).filter((call) => call.includes('--head feature')).length, 2)
+    assert.equal(calls.slice(1).filter((call) => call.includes('--head other')).length, 2)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('fails closed when a branch-specific PR listing is truncated', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-gh-truncated-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['worktree', 'remove', worktree])
+    squashMergeCandidateIntoMain(repo)
+    const mergeCommit = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+    const mergedPull = {
+      number: 1,
+      url: 'https://github.com/owner/repo/pull/1',
+      state: 'MERGED',
+      mergedAt: '2026-01-01T00:00:00Z',
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: { oid: mergeCommit },
+    }
+    const fillerHead = 'f'.repeat(40)
+    const batchPulls = [mergedPull, ...Array.from({ length: 999 }, (_, index) => ({
+      number: 1000 + index,
+      url: `https://github.com/owner/repo/pull/${1000 + index}`,
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: `other-${index}`,
+      headRefOid: fillerHead,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }))]
+    const branchPulls = [mergedPull, ...Array.from({ length: 99 }, (_, index) => ({
+      number: 2000 + index,
+      url: `https://github.com/owner/repo/pull/${2000 + index}`,
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: fillerHead,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }))]
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, batchPulls, branchPulls)
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    assert.equal(summary.results[0].reason, 'github-query-truncated')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.length, 2)
+    assert.match(calls[1], /--head feature/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('deletes an unattached closed-PR branch when another ref preserves its unmerged commit', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-branch-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(worktree, ['push', '-q', 'origin', 'HEAD:refs/heads/feature'])
+    git(repo, ['fetch', '-q', 'origin'])
+    git(repo, ['worktree', 'remove', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 3,
+      url: 'https://github.com/owner/repo/pull/3',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].reason, 'closed-pr')
+    assert.equal(summary.results[0].evidence.method, 'closed-pr')
+    assert.equal(summary.results[0].evidence.number, 3)
+    assert.equal(summary.results[0].branch_delete_method, 'git-update-ref-transaction-cas-with-closed-pr-evidence')
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/remotes/origin/feature']).stdout.trim(), head)
+    assert.ok((await ghCalls(ghLog)).some((call) => call.includes('--head feature')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('does not match a closed PR to a local branch by name when their heads are unrelated', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-unrelated-head-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(worktree, ['push', '-q', 'origin', 'HEAD:refs/heads/feature'])
+    git(repo, ['fetch', '-q', 'origin'])
+    git(repo, ['worktree', 'remove', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 5,
+      url: 'https://github.com/owner/repo/pull/5',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: 'f'.repeat(40),
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'merge-evidence-not-found')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/remotes/origin/feature']).stdout.trim(), head)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('preserves an attached ancestry branch with an open same-repository PR', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-open-pr-branch-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['merge', '--ff-only', 'feature'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 6,
+      url: 'https://github.com/owner/repo/pull/6',
+      state: 'OPEN',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'open-pull-request')
+    assert.equal(summary.results[0].detail, 'open PR #6 protects feature')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('preserves an unattached ancestry branch with an open same-repository PR', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-open-pr-unattached-ancestry-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['merge', '--ff-only', 'feature'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    git(repo, ['worktree', 'remove', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 16,
+      url: 'https://github.com/owner/repo/pull/16',
+      state: 'OPEN',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'open-pull-request')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('rechecks for an open PR before deleting a closed-PR branch', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-new-open-pr-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(worktree, ['push', '-q', 'origin', 'HEAD:refs/heads/feature'])
+    git(repo, ['fetch', '-q', 'origin'])
+    git(repo, ['worktree', 'remove', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const closedPull = {
+      number: 7,
+      url: 'https://github.com/owner/repo/pull/7',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    const openPull = {
+      number: 8,
+      url: 'https://github.com/owner/repo/pull/8',
+      state: 'OPEN',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeSequencedLoggingGh(fakeBin, ghLog, [[closedPull], [closedPull], [closedPull, openPull]])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    assert.match(summary.results[0].detail, /open PR #8 now protects feature/)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/remotes/origin/feature']).stdout.trim(), head)
+    assert.equal((await ghCalls(ghLog)).filter((call) => call.startsWith('pr list ')).length, 3)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('prefers patch-equivalence evidence over a closed PR when no recovery ref exists', async () => {
+  for (const method of ['patch-equivalence', 'aggregate-patch-equivalence']) {
+    const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), `clean-closed-pr-merged-evidence-${method}-`))
+    try {
+      const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+      if (method === 'aggregate-patch-equivalence') {
+        await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+        git(worktree, ['add', 'feature-2.txt'])
+        git(worktree, ['commit', '-qm', 'feature 2'])
+      }
+      const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+      squashMergeCandidateIntoMain(repo)
+      git(repo, ['worktree', 'remove', worktree])
+
+      const fakeBin = path.join(fixtureRoot, 'bin')
+      await mkdir(fakeBin, { recursive: true })
+      const ghLog = path.join(fixtureRoot, 'gh.log')
+      await writeLoggingGh(fakeBin, ghLog, [{
+        number: 7,
+        url: 'https://github.com/owner/repo/pull/7',
+        state: 'CLOSED',
+        mergedAt: null,
+        headRefName: 'feature',
+        headRefOid: head,
+        baseRefName: 'main',
+        headRepository: { nameWithOwner: 'owner/repo' },
+        mergeCommit: null,
+      }])
+
+      const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+        env: {
+          GIT_REPOSITORIES_ROOT: fixtureRoot,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+        },
+      })
+
+      assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+      const summary = JSON.parse(result.stdout)
+      assert.equal(summary.deleted, 1, JSON.stringify(summary.results, null, 2))
+      assert.equal(summary.errors, 0)
+      const branchResult = summary.results.find((item) => item.branch === 'feature')
+      assert.equal(branchResult.evidence.method, method)
+      assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
+      assert.equal((await ghCalls(ghLog)).length, 3)
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
+  }
+})
+
+test('rechecks a new open PR before deleting an ancestry branch and restores its worktree', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-ancestry-new-open-pr-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['merge', '--ff-only', 'feature'])
+    git(repo, ['push', '-q', 'origin', 'main'])
+    git(repo, ['fetch', '-q', 'origin', 'main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const openPull = {
+      number: 17,
+      url: 'https://github.com/owner/repo/pull/17',
+      state: 'OPEN',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeSequencedLoggingGh(fakeBin, ghLog, [[], [openPull]])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    const branchResult = summary.results.find((item) => item.branch === 'feature')
+    assert.ok(branchResult, JSON.stringify(summary.results, null, 2))
+    assert.equal(branchResult.reason, 'merge-evidence-changed-after-quarantine')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.equal(existsSync(worktree), true)
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.filter((call) => call.startsWith('pr list ')).length, 2)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('rechecks open PR state for every merge evidence method before deleting a worktree branch', async () => {
+  for (const method of ['github-merge-commit', 'patch-equivalence', 'aggregate-patch-equivalence']) {
+    const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), `clean-final-open-pr-${method}-`))
+    try {
+      const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+      if (method === 'aggregate-patch-equivalence') {
+        await writeFile(path.join(worktree, 'feature-2.txt'), 'feature 2\n')
+        git(worktree, ['add', 'feature-2.txt'])
+        git(worktree, ['commit', '-qm', 'feature 2'])
+      }
+      const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+      squashMergeCandidateIntoMain(repo)
+      const mergeCommit = git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim()
+      const mergedPull = {
+        number: 21,
+        url: 'https://github.com/owner/repo/pull/21',
+        state: 'MERGED',
+        mergedAt: '2026-01-01T00:00:00Z',
+        headRefName: 'feature',
+        headRefOid: head,
+        baseRefName: 'main',
+        headRepository: { nameWithOwner: 'owner/repo' },
+        mergeCommit: { oid: mergeCommit },
+      }
+      const openPull = {
+        number: 22,
+        url: 'https://github.com/owner/repo/pull/22',
+        state: 'OPEN',
+        mergedAt: null,
+        headRefName: 'feature',
+        headRefOid: head,
+        baseRefName: 'main',
+        headRepository: { nameWithOwner: 'owner/repo' },
+        mergeCommit: null,
+      }
+      const initialPulls = method === 'github-merge-commit' ? [mergedPull] : []
+      const fakeBin = path.join(fixtureRoot, 'bin')
+      await mkdir(fakeBin, { recursive: true })
+      const ghLog = path.join(fixtureRoot, 'gh.log')
+      const eventLog = path.join(fixtureRoot, 'events.log')
+      const realGit = run('which', ['git']).stdout.trim()
+      const fakeGit = path.join(fakeBin, 'git')
+      await writeFile(fakeGit, `#!/bin/sh
+printf 'git %s\\n' "$*" >> ${JSON.stringify(eventLog)}
+exec ${JSON.stringify(realGit)} "$@"
+`)
+      await chmod(fakeGit, 0o755)
+      const pullSnapshots = method === 'github-merge-commit'
+        ? [initialPulls, initialPulls, [...initialPulls, openPull]]
+        : [initialPulls, initialPulls, initialPulls, [...initialPulls, openPull]]
+      await writeSequencedLoggingGh(fakeBin, ghLog, pullSnapshots, eventLog)
+
+      const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+        env: {
+          GIT_REPOSITORIES_ROOT: fixtureRoot,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+        },
+      })
+
+      assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'expected final PR revalidation to reject deletion')
+      const summary = JSON.parse(result.stdout)
+      const branchResult = summary.results.find((item) => item.branch === 'feature')
+      assert.ok(branchResult, JSON.stringify(summary.results, null, 2))
+      assert.equal(branchResult.action, 'error')
+      assert.equal(branchResult.reason, 'merge-evidence-changed-after-quarantine')
+      assert.match(branchResult.detail, /open PR #22 now protects feature/)
+      assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+      assert.equal(existsSync(worktree), true)
+      assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+      const expectedCalls = method === 'github-merge-commit' ? 3 : 4
+      assert.equal((await ghCalls(ghLog)).filter((call) => call.startsWith('pr list ')).length, expectedCalls)
+      const events = (await readFile(eventLog, 'utf8')).split('\n').filter(Boolean)
+      const finalPullCheckIndex = events.findLastIndex((event) => event.startsWith('gh pr list '))
+      const finalIdentityCheckIndex = events.findLastIndex((event) => event.startsWith('git ') && event.includes('.cleanup-feature-') && event.includes('status --porcelain=v1'))
+      const worktreeRemoveIndex = events.findIndex((event) => event.startsWith('git ') && event.includes('worktree remove -f -f') && event.includes('.cleanup-feature-'))
+      assert.ok(finalIdentityCheckIndex >= 0, events.join('\n'))
+      assert.ok(finalPullCheckIndex > finalIdentityCheckIndex, events.join('\n'))
+      assert.equal(worktreeRemoveIndex, -1, events.join('\n'))
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
+  }
+})
+
+test('keeps an attached worktree for a closed PR when its commit has no other recovery ref', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-worktree-local-only-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 9,
+      url: 'https://github.com/owner/repo/pull/9',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.results[0].reason, 'closed-pr-local-commit-not-recoverable')
+    assert.equal(summary.results[0].evidence.method, 'closed-pr')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.match(git(repo, ['worktree', 'list', '--porcelain']).stdout, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores a closed-PR worktree when its recovery ref disappears during quarantine', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-recovery-ref-race-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['branch', 'recovery', head])
+    const tools = await installProcessInjectionTools(fixtureRoot, worktree, 'after-quarantine-drop-recovery-ref', false, 'refs/heads/recovery')
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 18,
+      url: 'https://github.com/owner/repo/pull/18',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], tools.options)
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].action, 'skip')
+    assert.equal(summary.results[0].reason, 'closed-pr-local-commit-not-recoverable')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.equal(existsSync(worktree), true)
+    const listing = git(repo, ['worktree', 'list', '--porcelain']).stdout
+    assert.match(listing, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+    assert.doesNotMatch(listing, /\\.cleanup-feature-/)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/recovery']).status, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores a closed-PR worktree when its recovery ref disappears after selection before transaction prepare', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-recovery-before-prepare-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['branch', 'recovery', head])
+    const tools = await installProcessInjectionTools(fixtureRoot, worktree, 'before-recovery-ref-prepare', false, 'refs/heads/recovery')
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 23,
+      url: 'https://github.com/owner/repo/pull/23',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], tools.options)
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'expected the prepared ref transaction to abort')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.errors, 1)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+    assert.equal(existsSync(worktree), true)
+    const listing = git(repo, ['worktree', 'list', '--porcelain']).stdout
+    assert.match(listing, new RegExp(worktree.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+    assert.doesNotMatch(listing, /\\.cleanup-feature-/)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/recovery']).status, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a closed-PR branch when no other ref preserves its unmerged commit', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-closed-pr-local-only-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
+    git(repo, ['worktree', 'remove', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const pull = {
+      number: 4,
+      url: 'https://github.com/owner/repo/pull/4',
+      state: 'CLOSED',
+      mergedAt: null,
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: null,
+    }
+    await writeLoggingGh(fakeBin, ghLog, [pull])
+
+    const result = run(entrypoint, ['--repo', repo, '--apply', '--json'], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.deleted, 0)
+    assert.equal(summary.skipped, 1)
+    assert.equal(summary.errors, 0)
+    assert.equal(summary.results[0].reason, 'closed-pr-local-commit-not-recoverable')
+    assert.equal(summary.results[0].evidence.method, 'closed-pr')
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
   }

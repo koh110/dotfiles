@@ -12,7 +12,7 @@ import { aggregatePatchEquivalence as checkAggregatePatchEquivalence } from './a
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, merged, unlocked linked worktrees under GIT_REPOSITORIES_ROOT are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree. Local branches not checked out in any worktree are deleted under the same merge policy. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, unlocked linked worktrees under GIT_REPOSITORIES_ROOT with verified merge evidence or a same-repository closed-PR head match are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion.\nThe default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree, or when its same-repository closed PR has the same head branch and its local head matches or precedes the PR head. A closed PR is not merge evidence; an unmerged branch is removed only when another ref preserves its commits, and an open PR protects its branch. Local branches not checked out in any worktree follow the same cleanup rules. Remote branches are never deleted.\n`)
 }
 
 type RunOptions = {
@@ -45,7 +45,7 @@ function git(repo: string, args: string[], options: RunOptions = {}) {
   return run('git', ['-C', repo, ...args], options)
 }
 
-async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null) {
+async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null, recoveryRef: string | null = null, recoveryOid: string | null = null, beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
   const command = ['-C', repo, 'update-ref', '--stdin']
   let stdout = ''
   let stderr = ''
@@ -88,7 +88,8 @@ async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: st
       await finished
     }
   }
-  child.stdin.write(`start\nverify ${defaultRef} ${expectedDefaultHead}\ndelete ${ref} ${expectedOid}\nprepare\n`)
+  const recoveryVerify = recoveryRef && recoveryOid ? `verify ${recoveryRef} ${recoveryOid}\n` : ''
+  child.stdin.write(`start\nverify ${defaultRef} ${expectedDefaultHead}\n${recoveryVerify}delete ${ref} ${expectedOid}\nprepare\n`)
   const prepareDeadline = Date.now() + 30_000
   const hasAck = (name: string) => stdout.split(/\r?\n/).includes(`${name}: ok`)
   while (!closed && Date.now() < prepareDeadline && !hasAck('prepare')) {
@@ -119,12 +120,6 @@ async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: st
     const failed = result()
     return { ok: false, committed: false, error: `${ref} became used by another worktree while its ref lock was held${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
   }
-  const evidenceError = verifyUnderLock()
-  if (evidenceError) {
-    await abort()
-    const failed = result()
-    return { ok: false, committed: false, error: `${evidenceError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}` }
-  }
   let preCommit
   try {
     preCommit = await beforeCommit()
@@ -133,21 +128,75 @@ async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: st
   }
   if (!preCommit.ok) {
     await abort()
+    let cleanupError = ''
+    try {
+      const released = await afterAbort()
+      if (!released.ok) cleanupError = `; pre-commit lock release failed: ${released.error || 'unknown error'}`
+    } catch (error) {
+      cleanupError = `; pre-commit lock release failed: ${errorText(error)}`
+    }
     const failed = result()
     return {
       ok: false,
       committed: false,
       reason: preCommit.reason || 'branch-delete-failed',
-      error: `${preCommit.error || 'pre-commit cleanup failed'}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
+      error: `${preCommit.error || 'pre-commit cleanup failed'}${cleanupError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
+    }
+  }
+  const evidenceError = verifyUnderLock()
+  if (evidenceError) {
+    await abort()
+    let cleanupError = ''
+    try {
+      const released = await afterAbort()
+      if (!released.ok) cleanupError = `; pre-commit lock release failed: ${released.error || 'unknown error'}`
+    } catch (error) {
+      cleanupError = `; pre-commit lock release failed: ${errorText(error)}`
+    }
+    const failed = result()
+    return {
+      ok: false,
+      committed: false,
+      reason: 'merge-evidence-changed-after-quarantine',
+      error: `${evidenceError}${cleanupError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
+    }
+  }
+  let preRefCommit
+  try {
+    preRefCommit = await beforeRefCommit()
+  } catch (error) {
+    preRefCommit = { ok: false, reason: 'branch-delete-failed', error: errorText(error) }
+  }
+  if (!preRefCommit.ok) {
+    await abort()
+    let cleanupError = ''
+    try {
+      const released = await afterAbort()
+      if (!released.ok) cleanupError = `; pre-commit lock release failed: ${released.error || 'unknown error'}`
+    } catch (error) {
+      cleanupError = `; pre-commit lock release failed: ${errorText(error)}`
+    }
+    const failed = result()
+    return {
+      ok: false,
+      committed: false,
+      reason: preRefCommit.reason || 'branch-delete-failed',
+      error: `${preRefCommit.error || 'pre-ref-commit cleanup failed'}${cleanupError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
     }
   }
   child.stdin.write('commit\n')
   child.stdin.end()
   await finished
   const committed = result()
-  return committed.ok && hasAck('commit')
-    ? { ...committed, committed: true }
-    : { ...committed, committed: false, error: `${commandDiagnostic('git', command, committed)}; update-ref commit acknowledgement was not received` }
+  if (committed.ok && hasAck('commit')) return { ...committed, committed: true }
+  let cleanupError = ''
+  try {
+    const released = await afterAbort()
+    if (!released.ok) cleanupError = `; pre-commit lock release failed: ${released.error || 'unknown error'}`
+  } catch (error) {
+    cleanupError = `; pre-commit lock release failed: ${errorText(error)}`
+  }
+  return { ...committed, committed: false, error: `${commandDiagnostic('git', command, committed)}; update-ref commit acknowledgement was not received${cleanupError}` }
 }
 
 function verifyRefAbsent(repo, ref) {
@@ -283,12 +332,78 @@ function patchEquivalence(repo: string, expectedHead: string, defaultRef: string
   }
 }
 
-function mergeEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head) {
+function closedPullRequestEvidenceError(repo: string, branchRef: string, expectedHead: string, evidence: any): string | null {
+  const branch = branchRef.replace(/^refs\/heads\//, '')
+  if (branchRef !== `refs/heads/${evidence.head_ref}` || expectedHead !== evidence.branch_head) {
+    return `${branchRef}@${expectedHead} no longer matches its closed PR evidence`
+  }
+  const remote = git(repo, ['config', '--get', 'remote.origin.url'])
+  if (!remote.ok) return commandDiagnostic('git', ['-C', repo, 'config', '--get', 'remote.origin.url'], remote)
+  const target = ownerRepo(remote.stdout)
+  if (!target || target !== evidence.repository || evidence.head_repository !== target) {
+    return `${branchRef} closed PR repository changed before deletion`
+  }
+  const objectFormat = gitObjectIdLength(repo)
+  if (!objectFormat.ok) return objectFormat.error
+  const currentPulls = queryPullRequests(target, objectFormat.length, PULL_REQUEST_BRANCH_LIMIT, branch)
+  if (!currentPulls.ok) return `closed PR #${evidence.number} revalidation failed: ${currentPulls.error}`
+  if (currentPulls.truncated) return `closed PR #${evidence.number} revalidation returned a truncated branch list`
+  const openPull = currentPulls.pulls.find((pull) => pull.state === 'OPEN' && pull.headRepository?.nameWithOwner === target)
+  if (openPull) return `open PR #${openPull.number} now protects ${branch}`
+  const pull = currentPulls.pulls.find((candidate) => candidate.number === evidence.number)
+  if (!pull) return `closed PR #${evidence.number} is no longer listed for ${branch}`
+  if (pull.url !== evidence.pr || pull.state !== 'CLOSED' || pull.mergedAt !== null) {
+    return `PR #${evidence.number} is no longer closed and unmerged`
+  }
+  if (pull.headRefName !== branch || pull.headRefOid !== evidence.pr_head || pull.headRepository?.nameWithOwner !== target || pull.baseRefName !== evidence.base_ref) {
+    return `PR #${evidence.number} head or repository changed before deletion`
+  }
+  if (evidence.head_relation === 'exact' && expectedHead === pull.headRefOid) return null
+  if (evidence.head_relation === 'ancestor' && git(repo, ['merge-base', '--is-ancestor', expectedHead, pull.headRefOid]).ok) return null
+  return `PR #${evidence.number} no longer contains ${branchRef}@${expectedHead}`
+}
+
+function openPullRequestEvidenceError(repo: string, branchRef: string, evidence: any): string | null {
+  const branch = evidence.head_ref
+  if (branchRef !== `refs/heads/${branch}`) return `${branchRef} no longer matches its GitHub head branch evidence`
+  const remote = git(repo, ['config', '--get', 'remote.origin.url'])
+  if (!remote.ok) return commandDiagnostic('git', ['-C', repo, 'config', '--get', 'remote.origin.url'], remote)
+  const target = ownerRepo(remote.stdout)
+  if (!target || target !== evidence.repository) return `${branchRef} GitHub repository changed before deletion`
+  const objectFormat = gitObjectIdLength(repo)
+  if (!objectFormat.ok) return objectFormat.error
+  const currentPulls = queryPullRequests(target, objectFormat.length, PULL_REQUEST_BRANCH_LIMIT, branch)
+  if (!currentPulls.ok) return `PR state revalidation failed for ${branch}: ${currentPulls.error}`
+  const openPull = currentPulls.pulls.find((pull) => pull.state === 'OPEN' && pull.headRefName === branch && pull.headRepository?.nameWithOwner === target)
+  if (openPull) return `open PR #${openPull.number} now protects ${branch}`
+  if (currentPulls.truncated) return `PR state revalidation returned a truncated branch list for ${branch}`
+  return null
+}
+
+function closedPrRecoveryRef(repo: string, branchRef: string, expectedHead: string): { ok: true, ref: string | null, oid: string | null } | { ok: false, error: string } {
+  const args = ['for-each-ref', '--contains', expectedHead, '--format=%(refname)%00%(objectname)']
+  const listed = git(repo, args)
+  if (!listed.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...args], listed) }
+  const refs = listed.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [ref, oid] = line.split('\0')
+    return { ref, oid }
+  })
+  if (refs.some((item) => !item.ref || !isGitObjectId(item.oid))) return { ok: false, error: 'git for-each-ref returned a malformed recovery ref record' }
+  const recovery = refs.find((item) => item.ref !== branchRef)
+  return { ok: true, ref: recovery?.ref || null, oid: recovery?.oid || null }
+}
+
+function cleanupEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head, checkOpenPullRequest = true) {
   if (!isGitObjectId(expectedDefaultHead)) return `invalid expected default ref OID for ${defaultRef}: ${expectedDefaultHead || '<missing>'}`
   const defaultResult = git(repo, ['rev-parse', '--verify', defaultRef])
   if (!defaultResult.ok) return commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', defaultRef], defaultResult)
   const actualDefaultHead = defaultResult.stdout.trim()
   if (actualDefaultHead !== expectedDefaultHead) return `default ref changed: ${actualDefaultHead || '<missing>'} != ${expectedDefaultHead}`
+  if (evidence.method === 'closed-pr') return closedPullRequestEvidenceError(repo, branchRef, expectedHead, evidence)
+  if (checkOpenPullRequest && evidence.method !== 'closed-pr' && evidence.repository && evidence.head_ref) {
+    const openPullError = openPullRequestEvidenceError(repo, branchRef, evidence)
+    if (openPullError) return openPullError
+  }
   if (evidence.method === 'ancestry') {
     return git(repo, ['merge-base', '--is-ancestor', expectedHead, defaultRef]).ok ? null : `${branchRef}@${expectedHead} is no longer an ancestor of ${defaultRef}`
   }
@@ -312,22 +427,26 @@ function mergeEvidenceError(repo: string, branchRef: string, expectedHead: strin
   return `unsupported merge evidence for ${branchRef}: ${evidence.method || '<missing>'}`
 }
 
-// Deletes a local branch whose tip is proven merged into the default branch, whether or not it
-// was ever attached to a worktree. `git branch -d` is not used: it judges mergedness against the
-// branch upstream when one is configured, so a branch rebased onto and merged into the default
-// branch but never pushed again is refused. The CAS transaction re-verifies the merge evidence
-// and worktree usage while the ref lock is held instead.
-async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], branchRef: string, expectedHead: string, defaultRef: string, expectedDefaultHead: string, evidence: any, allowedWorktreePath: string | null = null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true })) {
+function cleanupReason(evidence: any) {
+  return evidence.method === 'closed-pr' ? 'closed-pr' : 'merged'
+}
+
+// merge確認済みまたはclosed PRで候補となったlocal branchを、worktreeで使用されていない場合に削除する。
+// `git branch -d`はupstream基準のmergedness判定で拒否する場合があるため使わず、ref CAS transaction中にevidenceとworktree使用状況を再検証する。
+// closed PRについては、別のrefが未merge commitを保持していることも同じtransactionで確認する。
+async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], branchRef: string, expectedHead: string, defaultRef: string, expectedDefaultHead: string, evidence: any, allowedWorktreePath: string | null = null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
   const branchDeleteMethod = evidence.method === 'ancestry'
     ? 'git-update-ref-transaction-cas-with-ancestry-evidence'
     : evidence.method === 'patch-equivalence'
       ? 'git-update-ref-transaction-cas-with-patch-equivalence-evidence'
       : evidence.method === 'aggregate-patch-equivalence'
         ? 'git-update-ref-transaction-cas-with-aggregate-patch-equivalence-evidence'
+        : evidence.method === 'closed-pr'
+          ? 'git-update-ref-transaction-cas-with-closed-pr-evidence'
         : 'git-update-ref-transaction-cas-with-merge-evidence'
   const headLocks = await acquireWorktreeHeadLocks(worktreeRecords)
   if (!headLocks.ok) return { ok: false, reason: 'worktree-head-lock-failed', detail: headLocks.error, branch_delete_method: branchDeleteMethod }
-  let outcome = { ok: false, reason: 'branch-delete-failed', detail: 'branch deletion did not run', branch_delete_method: branchDeleteMethod }
+  let outcome: { ok: boolean, reason: string, detail?: string, branch_delete_method: string, branch_retained?: boolean, branch_retained_reason?: string } = { ok: false, reason: 'branch-delete-failed', detail: 'branch deletion did not run', branch_delete_method: branchDeleteMethod }
   try {
     const fencedListing = git(repo, ['worktree', 'list', '--porcelain', '-z'])
     if (!fencedListing.ok) {
@@ -344,7 +463,18 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
       if (!refBeforeDelete.ok || refBeforeDelete.stdout.trim() !== expectedHead) {
         outcome = { ok: false, reason: 'branch-head-changed-before-delete', detail: !refBeforeDelete.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], refBeforeDelete) : `${branchRef} changed: ${refBeforeDelete.stdout.trim()} != ${expectedHead}`, branch_delete_method: branchDeleteMethod }
       } else {
-        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, () => mergeEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead), beforeCommit, allowedWorktreePath)
+        const recovery = evidence.method === 'closed-pr' ? closedPrRecoveryRef(repo, branchRef, expectedHead) : null
+        if (recovery && (!recovery.ok || !recovery.ref || !recovery.oid)) {
+          outcome = {
+            ok: true,
+            reason: 'closed-pr-branch-retained',
+            branch_retained: true,
+            branch_retained_reason: recovery.ok ? 'closed-pr-local-commit-not-recoverable' : 'closed-pr-recovery-ref-check-unavailable',
+            detail: recovery.ok ? 'no other ref preserves this unmerged commit' : recovery.error,
+            branch_delete_method: 'closed-pr-local-commit-retained',
+          }
+        } else {
+        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, () => cleanupEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead), beforeCommit, allowedWorktreePath, recovery?.ref || null, recovery?.oid || null, beforeRefCommit, afterAbort)
         if (!branchDelete.ok) {
           let restoreDetail = ''
           if (branchDelete.committed) {
@@ -373,9 +503,10 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
             const restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
             outcome = { ok: false, reason: 'branch-delete-unverified', detail: `${issues.filter(Boolean).join('; ')}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
           } else {
-            outcome = { ok: true, branch_delete_method: branchDeleteMethod }
-          }
-        }
+            outcome = { ok: true, reason: 'branch-deleted', branch_delete_method: branchDeleteMethod }
+            }
+            }
+            }
       }
     }
     }
@@ -1475,11 +1606,11 @@ function remoteDefaultState(repo, expectedName, explicit = false) {
   return { ok: true, name: expectedName, oid }
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function gitObjectIdLength(repo) {
+function gitObjectIdLength(repo: string): { ok: true, length: number } | { ok: false, code: string, error: string } {
   const result = git(repo, ['rev-parse', '--show-object-format'])
   if (!result.ok) return { ok: false, code: 'git-object-format-unreadable', error: commandDiagnostic('git', ['-C', repo, 'rev-parse', '--show-object-format'], result) }
   const format = result.stdout.trim()
@@ -1488,49 +1619,121 @@ function gitObjectIdLength(repo) {
   return { ok: false, code: 'git-object-format-unsupported', error: `unsupported Git object format: ${format || '<empty>'}` }
 }
 
-const MERGED_PR_BATCH_LIMIT = 1000
-const MERGED_PR_BRANCH_LIMIT = 100
-const MERGED_PR_FIELDS = 'number,url,mergedAt,headRefName,headRefOid,mergeCommit'
-
-function validatePullList(pulls, oidLength) {
-  if (!Array.isArray(pulls)) return 'gh pr list response must be an array'
-  const oidPattern = new RegExp(`^[0-9a-f]{${oidLength}}$`)
-  for (const pull of pulls) {
-    if (!isRecord(pull) || !Number.isInteger(pull.number) || pull.number < 1 || typeof pull.url !== 'string' || pull.url.length === 0 || (pull.mergedAt !== null && typeof pull.mergedAt !== 'string')) {
-      return 'gh pr list response contains an invalid pull object'
-    }
-    if (typeof pull.headRefName !== 'string' || pull.headRefName.length === 0) return 'gh pr list headRefName is invalid'
-    if (typeof pull.headRefOid !== 'string' || !oidPattern.test(pull.headRefOid)) return 'gh pr list headRefOid is invalid'
-    if (pull.mergeCommit !== null && (!isRecord(pull.mergeCommit) || typeof pull.mergeCommit.oid !== 'string' || !oidPattern.test(pull.mergeCommit.oid))) return 'gh pr list mergeCommit is invalid'
-  }
-  return null
+type PullRequest = {
+  number: number
+  url: string
+  state: 'OPEN' | 'CLOSED' | 'MERGED'
+  mergedAt: string | null
+  headRefName: string
+  headRefOid: string
+  baseRefName: string
+  headRepository: { nameWithOwner: string } | null
+  mergeCommit: { oid: string } | null
 }
 
-function queryMergedPulls(target, defaultName, oidLength, limit, headBranch = null) {
-  const args = ['pr', 'list', '--repo', target, '--state', 'merged', '--base', defaultName, '--limit', String(limit), '--json', MERGED_PR_FIELDS]
-  if (headBranch) args.splice(6, 0, '--head', headBranch)
+type PullRequestQuery = { ok: true, pulls: PullRequest[], truncated: boolean } | { ok: false, code: string, error: string }
+type PullListValidation = { ok: true, pulls: PullRequest[] } | { ok: false, error: string }
+type PullRequestContext = { ok: true, target: string, oidLength: number } | { ok: false, code: string, error: string, repository?: string }
+type PullRequestEvidenceResult = {
+  ok: true
+  repository: string
+  openPull: PullRequest | null
+  match: PullRequest | null
+  closedMatch: PullRequest | null
+  mergeCommit: string | null
+  prHead: string | null
+  closedHead: string | null
+  headRelation: 'exact' | 'ancestor' | null
+} | { ok: false, code: string, error: string, repository?: string, mergeCommit?: string | null }
+type CleanupEvidence =
+  | { method: 'ancestry', default_ref: string, default_head: string, repository?: string, head_ref: string }
+  | { method: 'github-merge-commit', pr: string, number: number, merged_at: string, merge_commit: string, pr_head: string, head_relation: 'exact' | 'ancestor', default_ref: string, default_head: string, repository?: string, head_ref: string }
+  | { method: 'patch-equivalence', default_ref: string, default_head: string, commit_count: number, repository?: string, head_ref: string }
+  | { method: 'aggregate-patch-equivalence', default_ref: string, default_head: string, merge_base: string, commit_count: number, changed_path_count: number, repository?: string, head_ref: string }
+  | { method: 'closed-pr', pr: string, number: number, state: 'CLOSED', repository: string, head_repository: string, head_ref: string, pr_head: string, branch_head: string, head_relation: 'exact' | 'ancestor', base_ref: string, default_ref: string, default_head: string }
+type CleanupEvidenceResolution =
+  | { ok: false, code: string, error: string, repository?: string, pr_error?: { code: string, detail: string } }
+  | { ok: true, evidence: CleanupEvidence | null, skip_reason?: string, detail?: string }
+
+const PULL_REQUEST_BATCH_LIMIT = 1000
+const PULL_REQUEST_BRANCH_LIMIT = 100
+const PULL_REQUEST_FIELDS = 'number,url,state,mergedAt,headRefName,headRefOid,baseRefName,headRepository,mergeCommit'
+
+function validatePullList(pulls: unknown, oidLength: number): PullListValidation {
+  if (!Array.isArray(pulls)) return { ok: false, error: 'gh pr list response must be an array' }
+  const oidPattern = new RegExp(`^[0-9a-f]{${oidLength}}$`)
+  const validatedPulls: PullRequest[] = []
+  const values: unknown[] = pulls
+  for (const value of values) {
+    if (!isRecord(value)) return { ok: false, error: 'gh pr list response contains an invalid pull object' }
+    const number = value.number
+    const url = value.url
+    const state = value.state
+    const mergedAt = value.mergedAt
+    const headRefName = value.headRefName
+    const headRefOid = value.headRefOid
+    const baseRefName = value.baseRefName
+    const headRepository = value.headRepository
+    const mergeCommit = value.mergeCommit
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < 1 || typeof url !== 'string' || url.length === 0 || (state !== 'OPEN' && state !== 'CLOSED' && state !== 'MERGED') || (mergedAt !== null && typeof mergedAt !== 'string')) {
+      return { ok: false, error: 'gh pr list response contains an invalid pull object' }
+    }
+    if (typeof headRefName !== 'string' || headRefName.length === 0) return { ok: false, error: 'gh pr list headRefName is invalid' }
+    if (typeof headRefOid !== 'string' || !oidPattern.test(headRefOid)) return { ok: false, error: 'gh pr list headRefOid is invalid' }
+    if (typeof baseRefName !== 'string' || baseRefName.length === 0) return { ok: false, error: 'gh pr list baseRefName is invalid' }
+    if ((state === 'MERGED') !== (mergedAt !== null)) return { ok: false, error: 'gh pr list state and mergedAt are inconsistent' }
+    let normalizedHeadRepository: PullRequest['headRepository'] = null
+    if (headRepository !== null) {
+      if (!isRecord(headRepository)) return { ok: false, error: 'gh pr list headRepository is invalid' }
+      const nameWithOwner = headRepository.nameWithOwner
+      if (typeof nameWithOwner !== 'string' || nameWithOwner.length === 0) return { ok: false, error: 'gh pr list headRepository is invalid' }
+      normalizedHeadRepository = { nameWithOwner }
+    }
+    let normalizedMergeCommit: PullRequest['mergeCommit'] = null
+    if (mergeCommit !== null) {
+      if (!isRecord(mergeCommit)) return { ok: false, error: 'gh pr list mergeCommit is invalid' }
+      const oid = mergeCommit.oid
+      if (typeof oid !== 'string' || !oidPattern.test(oid)) return { ok: false, error: 'gh pr list mergeCommit is invalid' }
+      normalizedMergeCommit = { oid }
+    }
+    validatedPulls.push({
+      number,
+      url,
+      state,
+      mergedAt,
+      headRefName,
+      headRefOid,
+      baseRefName,
+      headRepository: normalizedHeadRepository,
+      mergeCommit: normalizedMergeCommit,
+    })
+  }
+  return { ok: true, pulls: validatedPulls }
+}
+
+function queryPullRequests(target: string, oidLength: number, limit: number, headBranch: string | null = null): PullRequestQuery {
+  const args = ['pr', 'list', '--repo', target, '--state', 'all', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
+  if (headBranch) args.push('--head', headBranch)
   const response = run('gh', args, { timeout: 120_000 })
   if (!response.ok) return { ok: false, code: 'github-query-failed', error: (response.stderr || response.error || '').trim() }
-  let pulls
+  let decoded: unknown
   try {
-    pulls = JSON.parse(response.stdout)
+    decoded = JSON.parse(response.stdout)
   } catch (error) {
     return { ok: false, code: 'github-invalid-json', error: errorText(error) }
   }
-  const pullListError = validatePullList(pulls, oidLength)
-  if (pullListError) return { ok: false, code: 'github-invalid-response', error: pullListError }
+  const validatedPulls = validatePullList(decoded, oidLength)
+  if (!validatedPulls.ok) return { ok: false, code: 'github-invalid-response', error: validatedPulls.error }
+  const pulls = validatedPulls.pulls
   return { ok: true, pulls, truncated: pulls.length >= limit }
 }
 
-// Resolves merged-PR evidence with one `gh pr list` per repository. A local branch head
-// can match the merged PR head exactly or be an ancestor of it. The batch is fetched lazily
-// and a truncated batch falls back to a per-branch `--head` query. When PR evidence is absent,
-// the resolver falls back to read-only `git cherry` patch-equivalence evidence so local merges,
-// cherry-picks, and non-GitHub repositories can still be cleaned safely.
-function createMergedPrLookup(repo, defaultName, defaultRef) {
-  let context = null
-  let batch = null
-  function loadContext() {
+// closed PRは同一repository内の同名head branchに限って候補とし、local HEADがPR headと一致するか、その祖先であることを要求する。
+// 同じrepositoryのopen PRがあれば、merge状態にかかわらずcleanupを止める。
+function createPullRequestLookup(repo: string, defaultName: string, defaultRef: string) {
+  let context: PullRequestContext | null = null
+  let batch: PullRequestQuery | null = null
+  function loadContext(): PullRequestContext {
     if (context) return context
     const remote = git(repo, ['config', '--get', 'remote.origin.url'])
     if (!remote.ok) return (context = { ok: false, code: 'missing-origin', error: remote.stderr.trim() })
@@ -1540,39 +1743,99 @@ function createMergedPrLookup(repo, defaultName, defaultRef) {
     if (!objectFormat.ok) return (context = { ok: false, code: objectFormat.code, error: objectFormat.error, repository: target })
     return (context = { ok: true, target, oidLength: objectFormat.length })
   }
-  function matchPulls(pulls, target, head) {
-    let unreachable = null
-    for (const pull of pulls) {
+  function matchPulls(pulls: PullRequest[], target: string, branch: string, head: string): PullRequestEvidenceResult {
+    const branchPulls = pulls.filter((pull) => pull.headRefName === branch)
+    const openPull = branchPulls.find((pull) => pull.state === 'OPEN' && pull.headRepository?.nameWithOwner === target)
+    if (openPull) return { ok: true, openPull, match: null, closedMatch: null, mergeCommit: null, prHead: null, closedHead: null, headRelation: null, repository: target }
+    let unreachable: { pull: PullRequest, mergeCommit: string | null } | null = null
+    for (const pull of branchPulls) {
+      if (pull.state !== 'MERGED' || pull.baseRefName !== defaultName) continue
       const exactHead = pull.headRefOid === head
       const ancestorHead = !exactHead
         && git(repo, ['cat-file', '-e', `${pull.headRefOid}^{commit}`]).ok
         && git(repo, ['merge-base', '--is-ancestor', head, pull.headRefOid]).ok
       if (!exactHead && !ancestorHead) continue
-      const mergeCommit = pull.mergeCommit?.oid
-      const mergeCommitExists = mergeCommit && git(repo, ['cat-file', '-e', `${mergeCommit}^{commit}`]).ok
-      const mergeCommitReachable = mergeCommitExists && git(repo, ['merge-base', '--is-ancestor', mergeCommit, defaultRef]).ok
-      if (mergeCommitReachable) return { ok: true, match: pull, repository: target, mergedHead: head, prHead: pull.headRefOid, headRelation: exactHead ? 'exact' : 'ancestor', mergeCommit }
-      unreachable ||= { pull, mergeCommit: mergeCommit || null }
+      const mergeCommit = pull.mergeCommit?.oid || null
+      const mergeCommitExists = Boolean(mergeCommit && git(repo, ['cat-file', '-e', `${mergeCommit}^{commit}`]).ok)
+      const mergeCommitReachable = Boolean(mergeCommitExists && mergeCommit && git(repo, ['merge-base', '--is-ancestor', mergeCommit, defaultRef]).ok)
+      if (mergeCommitReachable && mergeCommit) return { ok: true, match: pull, openPull: null, closedMatch: null, repository: target, mergeCommit, prHead: pull.headRefOid, headRelation: exactHead ? 'exact' : 'ancestor', closedHead: null }
+      unreachable ||= { pull, mergeCommit }
     }
     if (unreachable) return { ok: false, code: 'merge-evidence-unreachable', error: `PR #${unreachable.pull.number} merge commit is not reachable from ${defaultRef}`, repository: target, mergeCommit: unreachable.mergeCommit }
-    return { ok: true, match: null, repository: target }
+    for (const pull of branchPulls) {
+      if (pull.state !== 'CLOSED' || pull.mergedAt !== null || pull.headRepository?.nameWithOwner !== target) continue
+      const exactHead = pull.headRefOid === head
+      const ancestorHead = !exactHead
+        && git(repo, ['cat-file', '-e', `${pull.headRefOid}^{commit}`]).ok
+        && git(repo, ['merge-base', '--is-ancestor', head, pull.headRefOid]).ok
+      if (exactHead || ancestorHead) {
+        return {
+          ok: true,
+          closedMatch: pull,
+          openPull: null,
+          match: null,
+          mergeCommit: null,
+          repository: target,
+          closedHead: head,
+          headRelation: exactHead ? 'exact' : 'ancestor',
+          prHead: null,
+        }
+      }
+    }
+    return { ok: true, match: null, openPull: null, closedMatch: null, mergeCommit: null, prHead: null, closedHead: null, headRelation: null, repository: target }
   }
-  return function mergedPrEvidence(branch, head) {
+  return function pullRequestEvidence(branch: string, head: string): PullRequestEvidenceResult {
     const ctx = loadContext()
     if (!ctx.ok) return ctx
-    batch ||= queryMergedPulls(ctx.target, defaultName, ctx.oidLength, MERGED_PR_BATCH_LIMIT)
+    if (!batch) batch = queryPullRequests(ctx.target, ctx.oidLength, PULL_REQUEST_BATCH_LIMIT)
     if (!batch.ok) return { ...batch, repository: ctx.target }
-    const matched = matchPulls(batch.pulls.filter((pull) => pull.headRefName === branch), ctx.target, head)
-    if (!matched.ok || matched.match || !batch.truncated) return matched
-    const single = queryMergedPulls(ctx.target, defaultName, ctx.oidLength, MERGED_PR_BRANCH_LIMIT, branch)
+    const matched = matchPulls(batch.pulls, ctx.target, branch, head)
+    if (!batch.truncated || (matched.ok && matched.openPull)) return matched
+    const single = queryPullRequests(ctx.target, ctx.oidLength, PULL_REQUEST_BRANCH_LIMIT, branch)
     if (!single.ok) return { ...single, repository: ctx.target }
-    return matchPulls(single.pulls.filter((pull) => pull.headRefName === branch), ctx.target, head)
+    const branchMatch = matchPulls(single.pulls, ctx.target, branch, head)
+    if (branchMatch.ok && branchMatch.openPull) return branchMatch
+    if (single.truncated) {
+      return {
+        ok: false,
+        code: 'github-query-truncated',
+        error: `gh pr list returned at least ${PULL_REQUEST_BRANCH_LIMIT} records for head branch ${branch}`,
+        repository: ctx.target,
+      }
+    }
+    return branchMatch
   }
 }
 
-function resolveMergeEvidence(repo: string, branch: string, head: string, defaultRef: string, defaultHead: string, mergedPrEvidence: (branch: string, head: string) => any) {
-  const pr = mergedPrEvidence(branch, head)
+function openPullRequestGuard(branch: string, pr: PullRequestEvidenceResult) {
+  if (pr.ok && pr.openPull) {
+    return {
+      ok: true as const,
+      skip_reason: 'open-pull-request',
+      detail: `open PR #${pr.openPull.number} protects ${branch}`,
+      repository: pr.repository,
+    }
+  }
+  if (!pr.ok && pr.repository && pr.code !== 'merge-evidence-unreachable') {
+    return { ok: false as const, code: pr.code, error: pr.error, repository: pr.repository }
+  }
+  return { ok: true as const, skip_reason: null, repository: pr.repository }
+}
+
+function resolveCleanupEvidence(repo: string, branch: string, head: string, defaultRef: string, defaultHead: string, pullRequestEvidence: ReturnType<typeof createPullRequestLookup>): CleanupEvidenceResolution {
+  const pr = pullRequestEvidence(branch, head)
+  const protection = openPullRequestGuard(branch, pr)
+  if (!protection.ok) return protection
+  if (protection.skip_reason) {
+    return {
+      ok: true,
+      evidence: null,
+      skip_reason: protection.skip_reason,
+      detail: protection.detail,
+    }
+  }
   if (pr.ok && pr.match) {
+    if (!pr.mergeCommit || !pr.prHead || !pr.headRelation) return { ok: false, code: 'github-invalid-response', error: 'merged PR evidence is missing its merge commit or head relationship', repository: pr.repository }
     return {
       ok: true,
       evidence: {
@@ -1585,12 +1848,15 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
         head_relation: pr.headRelation,
         default_ref: defaultRef,
         default_head: defaultHead,
+        repository: pr.repository,
+        head_ref: pr.match.headRefName,
       },
     }
   }
 
+  const hasClosedPr = pr.ok && Boolean(pr.closedMatch)
   const patch = patchEquivalence(repo, head, defaultRef)
-  if (!patch.ok) {
+  if (!patch.ok && !hasClosedPr) {
     if (!pr.ok) {
       return {
         ok: false,
@@ -1602,7 +1868,7 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
     }
     return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error }
   }
-  if (patch.merged) {
+  if (patch.ok && patch.merged) {
     return {
       ok: true,
       evidence: {
@@ -1610,12 +1876,14 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
         default_ref: defaultRef,
         default_head: defaultHead,
         commit_count: patch.commit_count,
+        repository: pr.repository,
+        head_ref: branch,
       },
     }
   }
 
   const aggregate = checkAggregatePatchEquivalence(repo, head, defaultRef, git)
-  if (!aggregate.ok) {
+  if (!aggregate.ok && !hasClosedPr) {
     const error = !aggregate.error ? 'aggregate patch-equivalence query failed' : aggregate.error
     if (!pr.ok) {
       return {
@@ -1628,7 +1896,7 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
     }
     return { ok: false, code: 'aggregate-patch-equivalence-query-failed', error }
   }
-  if (aggregate.merged) {
+  if (aggregate.ok && aggregate.merged) {
     return {
       ok: true,
       evidence: {
@@ -1638,6 +1906,30 @@ function resolveMergeEvidence(repo: string, branch: string, head: string, defaul
         merge_base: aggregate.merge_base,
         commit_count: aggregate.commit_count,
         changed_path_count: aggregate.changed_path_count,
+        repository: pr.repository,
+        head_ref: branch,
+      },
+    }
+  }
+  if (pr.ok && pr.closedMatch) {
+    const headRepository = pr.closedMatch.headRepository?.nameWithOwner
+    if (!headRepository || !pr.closedHead || !pr.headRelation) return { ok: false, code: 'github-invalid-response', error: 'closed PR evidence is missing its head repository or commit relationship', repository: pr.repository }
+    return {
+      ok: true,
+      evidence: {
+        method: 'closed-pr',
+        pr: pr.closedMatch.url,
+        number: pr.closedMatch.number,
+        state: 'CLOSED',
+        repository: pr.repository,
+        head_repository: headRepository,
+        head_ref: pr.closedMatch.headRefName,
+        pr_head: pr.closedMatch.headRefOid,
+        branch_head: pr.closedHead,
+        head_relation: pr.headRelation,
+        base_ref: pr.closedMatch.baseRefName,
+        default_ref: defaultRef,
+        default_head: defaultHead,
       },
     }
   }
@@ -1794,7 +2086,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
   const defaultHeadResult = git(realRepo, ['rev-parse', '--verify', defaultInfo.ref])
   if (!defaultHeadResult.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-ref-unreadable' })
   const defaultHead = defaultHeadResult.stdout.trim()
-  const mergedPrEvidence = createMergedPrLookup(realRepo, defaultInfo.name, defaultInfo.ref)
+  const pullRequestEvidence = createPullRequestLookup(realRepo, defaultInfo.name, defaultInfo.ref)
   const remoteDefault = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
   if (!remoteDefault.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: remoteDefault.code, detail: remoteDefault.error })
   if (remoteDefault.oid !== defaultHead) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'local-default-stale', detail: `${defaultInfo.ref}=${defaultHead}, remote=${remoteDefault.oid}` })
@@ -1850,12 +2142,26 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: 'ignored-files-query-failed', detail: commandDiagnostic('git', ['-C', candidate, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredBeforeQuarantine) })
       continue
     }
+    const branchName = base.branch || ''
+    const prGuard = openPullRequestGuard(branchName, pullRequestEvidence(branchName, item.head || ''))
+    if (!prGuard.ok) {
+      results.push({ ...base, action: 'error', reason: prGuard.code, detail: prGuard.error, repository: prGuard.repository })
+      continue
+    }
+    if (prGuard.skip_reason) {
+      results.push({ ...base, action: 'skip', reason: prGuard.skip_reason, detail: prGuard.detail })
+      continue
+    }
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
-    let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
+    let evidence: CleanupEvidence | null = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: branchName } : null
     if (!evidence) {
-      const resolved = resolveMergeEvidence(realRepo, base.branch || '', item.head || '', defaultInfo.ref, defaultHead, mergedPrEvidence)
+      const resolved = resolveCleanupEvidence(realRepo, branchName, item.head || '', defaultInfo.ref, defaultHead, pullRequestEvidence)
       if (!resolved.ok) {
         results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
+        continue
+      }
+      if (resolved.skip_reason) {
+        results.push({ ...base, action: 'skip', reason: resolved.skip_reason, detail: resolved.detail })
         continue
       }
       evidence = resolved.evidence
@@ -1863,6 +2169,19 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     if (!evidence) {
       results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
       continue
+    }
+    if (evidence.method === 'closed-pr') {
+      const recovery = closedPrRecoveryRef(realRepo, item.branchRef || '', item.head || '')
+      if (!recovery.ok || !recovery.ref) {
+        results.push({
+          ...base,
+          action: 'skip',
+          reason: recovery.ok ? 'closed-pr-local-commit-not-recoverable' : 'closed-pr-recovery-ref-check-unavailable',
+          detail: recovery.ok ? 'no other ref preserves this unmerged commit' : recovery.error,
+          evidence,
+        })
+        continue
+      }
     }
 
     const processUsage = await processUsesWorktree(realCandidate)
@@ -1898,14 +2217,14 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
     if (evidence.method === 'patch-equivalence') {
-      const patchError = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      const patchError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (patchError) {
         results.push({ ...base, action: 'error', reason: 'patch-equivalence-changed-before-remove', detail: patchError, evidence })
         continue
       }
     }
     if (evidence.method === 'aggregate-patch-equivalence') {
-      const patchError = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      const patchError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (patchError) {
         results.push({ ...base, action: 'error', reason: 'aggregate-patch-equivalence-changed-before-remove', detail: patchError, evidence })
         continue
@@ -1930,8 +2249,15 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: compose.code, detail: compose.error, evidence, compose })
       continue
     }
+    if (evidence.method === 'closed-pr') {
+      const closedPrError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      if (closedPrError) {
+        results.push({ ...base, action: 'error', reason: 'closed-pr-evidence-changed-before-remove', detail: closedPrError, evidence })
+        continue
+      }
+    }
     if (!apply) {
-      results.push({ ...base, action: 'would-delete', reason: 'merged', evidence, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined })
+      results.push({ ...base, action: 'would-delete', reason: cleanupReason(evidence), evidence, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined })
       continue
     }
     const quarantineParent = path.dirname(realCandidate)
@@ -2075,7 +2401,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: 'remote-default-changed-after-quarantine', detail: `${remoteAfterQuarantine.ok ? `${remoteAfterQuarantine.oid} != ${defaultHead}` : remoteAfterQuarantine.error}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
-    const mergeEvidenceStillValid = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
+    const mergeEvidenceStillValid = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead, evidence.method !== 'ancestry') === null
     if (!mergeEvidenceStillValid) {
       const restored = await restoreQuarantine()
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
@@ -2147,7 +2473,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         // Reported by the post-clean identity check below.
       }
       const remoteAfterClean = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
-      const mergeEvidenceAfterClean = mergeEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
+      const mergeEvidenceAfterClean = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
       const postCleanIssues = []
       if (!headAfterClean.ok || headAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!headAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'rev-parse', '--verify', 'HEAD'], headAfterClean) : `HEAD changed after ignored cleanup: ${headAfterClean.stdout.trim()} != ${item.head}`)
       if (!branchAfterClean.ok || branchAfterClean.stdout.trim() !== item.branchRef) postCleanIssues.push(!branchAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'symbolic-ref', '-q', 'HEAD'], branchAfterClean) : `branch changed after ignored cleanup: ${branchAfterClean.stdout.trim()} != ${item.branchRef}`)
@@ -2177,12 +2503,24 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     const quarantinePath = path.resolve(quarantine)
     const headLockRecords = parseWorktrees(listingAfterQuarantine.stdout)
       .filter((worktree) => path.resolve(worktree.path) !== quarantinePath)
+    let contentLocks: Awaited<ReturnType<typeof acquireWorktreeLocks>> | null = null
+    const releaseContentLocks = async (consumed = false) => {
+      if (!contentLocks || !('release' in contentLocks) || typeof contentLocks.release !== 'function') return { ok: true }
+      const heldLocks = contentLocks
+      contentLocks = null
+      return heldLocks.release(consumed ? new Set(heldLocks.paths) : undefined)
+    }
     const beforeCommit = async () => {
-      const contentLocks: any = await acquireWorktreeLocks([{ path: quarantine }], ['HEAD', 'index'])
-      if (!contentLocks.ok) return { ok: false, reason: 'worktree-content-lock-failed', error: contentLocks.error }
+      const acquiredLocks = await acquireWorktreeLocks([{ path: quarantine }], ['HEAD', 'index'])
+      if (!acquiredLocks.ok) return { ok: false, reason: 'worktree-content-lock-failed', error: acquiredLocks.error }
+      contentLocks = acquiredLocks
       const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', realAllowedRoot, registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
       if (!identity.ok) {
-        const released = await contentLocks.release()
+        const released = await releaseContentLocks()
+        if (!released.ok) {
+          initialFence.retain = true
+          registrationFenceFailure = true
+        }
         return { ok: false, reason: 'worktree-identity-changed-before-remove', error: `${identity.error}${released.ok ? '' : `; content lock release failed: ${released.error}`}` }
       }
       const processUsageBeforeRemove = await processUsesWorktree(quarantine)
@@ -2190,9 +2528,10 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         const processDetail = processUsageBeforeRemove.ok
           ? `pid ${processUsageBeforeRemove.pid} uses ${processUsageBeforeRemove.location}`
           : processUsageBeforeRemove.error
-        const released = await contentLocks.release()
+        const released = await releaseContentLocks()
         if (!released.ok) {
           initialFence.retain = true
+          registrationFenceFailure = true
           return { ok: false, reason: 'worktree-content-lock-release-failed', error: `${processDetail}; content lock release failed: ${released.error}` }
         }
         return {
@@ -2201,19 +2540,26 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
           error: processDetail,
         }
       }
+      return { ok: true }
+    }
+    const beforeRefCommit = async () => {
       const removeArgs = ['worktree', 'remove', '-f', '-f', quarantine]
       const removed = git(realRepo, removeArgs)
       if (!removed.ok) {
         initialFence.retain = true
-        const released = await contentLocks.release()
+        registrationFenceFailure = true
         return {
           ok: false,
           reason: 'worktree-remove-failed',
-          error: `${commandDiagnostic('git', ['-C', realRepo, ...removeArgs], removed)}; quarantine registration lock retained for manual inspection${released.ok ? '' : `; content lock release failed: ${released.error}`}`,
+          error: `${commandDiagnostic('git', ['-C', realRepo, ...removeArgs], removed)}; quarantine registration lock retained for manual inspection`,
         }
       }
-      const consumedContentLocks = await contentLocks.release(new Set(contentLocks.paths))
-      if (!consumedContentLocks.ok) return { ok: false, reason: 'worktree-content-lock-release-failed', error: consumedContentLocks.error }
+      const consumedContentLocks = await releaseContentLocks(true)
+      if (!consumedContentLocks.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        return { ok: false, reason: 'worktree-content-lock-release-failed', error: consumedContentLocks.error }
+      }
       const verifyListing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
       const stillPresent = verifyListing.ok && parseWorktrees(verifyListing.stdout).some((worktree) => path.resolve(worktree.path) === quarantinePath)
       let pathStillPresent = false
@@ -2225,6 +2571,8 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         if (code !== 'ENOENT') pathStillPresent = true
       }
       if (!verifyListing.ok || stillPresent || pathStillPresent) {
+        initialFence.retain = true
+        registrationFenceFailure = true
         return {
           ok: false,
           reason: 'worktree-remove-unverified',
@@ -2237,7 +2585,15 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       }
       return { ok: true }
     }
-    const branchSafety = await deleteLocalBranchSafely(realRepo, headLockRecords, item.branchRef, item.head, defaultInfo.ref, defaultHead, evidence, quarantine, beforeCommit)
+    const afterAbort = async () => {
+      const released = await releaseContentLocks()
+      if (!released.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+      }
+      return released
+    }
+    const branchSafety = await deleteLocalBranchSafely(realRepo, headLockRecords, item.branchRef, item.head, defaultInfo.ref, defaultHead, evidence, quarantine, beforeCommit, beforeRefCommit, afterAbort)
     if (!branchSafety.ok) {
       if (branchSafety.reason === 'worktree-in-use' || branchSafety.reason === 'worktree-process-check-unavailable') {
         const restored = await restoreQuarantine()
@@ -2250,15 +2606,39 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         }
         continue
       }
+      if (branchSafety.reason === 'worktree-remove-failed') {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+        continue
+      }
       if (branchSafety.reason.startsWith('worktree-')) registrationFenceFailure = true
-      results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      const restored = await restoreQuarantine()
+      if (!restored.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: `${branchSafety.detail}; quarantine restore failed: ${restored.stderr.trim()}`, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      } else {
+        results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      }
       continue
     }
-    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
+    if (branchSafety.branch_retained) {
+      const restored = await restoreQuarantine()
+      if (!restored.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: 'closed-pr-worktree-restore-failed', detail: `${branchSafety.detail}; quarantine restore failed: ${restored.stderr.trim()}`, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      } else {
+        results.push({ ...base, action: 'skip', reason: branchSafety.branch_retained_reason || 'closed-pr-local-commit-not-recoverable', detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      }
+      continue
+    }
+    results.push({ ...base, action: 'deleted', reason: cleanupReason(evidence), evidence, branch_deleted: !branchSafety.branch_retained, branch_retained_reason: branchSafety.branch_retained_reason, detail: branchSafety.detail, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
   }
   if (registrationFenceFailure) return results
   const worktreeBranchRefs = new Set(worktrees.map((item) => item.branchRef).filter(Boolean))
-  results.push(...await cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, mergedPrEvidence, initialBranchHeads))
+  results.push(...await cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, pullRequestEvidence, initialBranchHeads))
   return results
   } finally {
     const released = await initialFences.release()
@@ -2288,13 +2668,14 @@ function hasUnattachedLocalBranches(repo, worktrees) {
   return listed.branches.some((branch) => !attached.has(branch.ref))
 }
 
-// Local branches that are not checked out in any worktree follow the same merge policy as
+// Local branches that are not checked out in any worktree follow the same cleanup policy as
 // worktree candidates: the tip is an ancestor of the default branch, is an ancestor of a
-// merged GitHub PR head with a reachable merge commit, has all commits patch-equivalent to the
-// default branch, or has its complete aggregate net patch from the merge base in the default tree.
+// merged GitHub PR head with a reachable merge commit, matches an exactly related closed PR,
+// has all commits patch-equivalent to the default branch, or has its complete aggregate net patch
+// from the merge base in the default tree.
 // Branches that were attached to a worktree at the start of this run are handled (or kept) by the
 // worktree pass and are not reconsidered here.
-async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explicitDefaultBranch: any, defaultInfo: any, defaultHead: any, worktreeBranchRefs: any, mergedPrEvidence: any, initialBranchHeads: any) {
+async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explicitDefaultBranch: any, defaultInfo: any, defaultHead: any, worktreeBranchRefs: any, pullRequestEvidence: any, initialBranchHeads: any) {
   const results: any[] = []
   const listed = listLocalBranches(realRepo)
   if (!listed.ok) return [{ repo: realRepo, action: 'error', reason: 'branch-list-failed', detail: listed.error }]
@@ -2310,13 +2691,24 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
       results.push({ ...base, action: 'error', reason: 'branch-head-changed-during-cleanup', detail: `${ref} changed from ${initialBranchHeads.get(ref)} to ${oid}` })
       continue
     }
+    const prGuard = openPullRequestGuard(base.branch, pullRequestEvidence(base.branch, oid))
+    if (!prGuard.ok) {
+      results.push({ ...base, action: 'error', reason: prGuard.code, detail: prGuard.error, repository: prGuard.repository })
+      continue
+    }
+    if (prGuard.skip_reason) {
+      results.push({ ...base, action: 'skip', reason: prGuard.skip_reason, detail: prGuard.detail })
+      continue
+    }
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', oid, defaultInfo.ref]).ok
-    let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
+    let evidence: CleanupEvidence | null = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: base.branch } : null
     if (!evidence) {
-      const resolved = resolveMergeEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, mergedPrEvidence)
+      const resolved = resolveCleanupEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, pullRequestEvidence)
       if (!resolved.ok) {
         if (resolved.code === 'patch-equivalence-query-failed' || resolved.code === 'aggregate-patch-equivalence-query-failed') {
           results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
+        } else if (resolved.repository && resolved.code !== 'merge-evidence-unreachable') {
+          results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository })
         } else {
           // Without merge evidence the branch is kept. Unattached branches are often local work or
           // live in non-GitHub repositories, so an unavailable PR lookup is not reported as an error.
@@ -2324,11 +2716,28 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
         }
         continue
       }
+      if (resolved.skip_reason) {
+        results.push({ ...base, action: 'skip', reason: resolved.skip_reason, detail: resolved.detail })
+        continue
+      }
       evidence = resolved.evidence
     }
     if (!evidence) {
       results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
       continue
+    }
+    if (evidence.method === 'closed-pr') {
+      const recovery = closedPrRecoveryRef(realRepo, ref, oid)
+      if (!recovery.ok || !recovery.ref) {
+        results.push({
+          ...base,
+          action: 'skip',
+          reason: recovery.ok ? 'closed-pr-local-commit-not-recoverable' : 'closed-pr-recovery-ref-check-unavailable',
+          detail: recovery.ok ? 'no other ref preserves this unmerged commit' : recovery.error,
+          evidence,
+        })
+        continue
+      }
     }
     const refBeforeDelete = git(realRepo, ['rev-parse', '--verify', ref])
     if (!refBeforeDelete.ok || refBeforeDelete.stdout.trim() !== oid) {
@@ -2345,13 +2754,13 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
       results.push({ ...base, action: 'error', reason: remoteBeforeDelete.ok ? 'remote-default-changed-before-delete' : remoteBeforeDelete.code, detail: remoteBeforeDelete.ok ? `${remoteBeforeDelete.oid} != ${defaultHead}` : remoteBeforeDelete.error, evidence })
       continue
     }
-    const evidenceError = mergeEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence, defaultHead)
+    const evidenceError = cleanupEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence, defaultHead, !apply || evidence.method !== 'ancestry')
     if (evidenceError) {
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-before-delete', detail: evidenceError, evidence })
       continue
     }
     if (!apply) {
-      results.push({ ...base, action: 'would-delete', reason: 'merged', evidence })
+      results.push({ ...base, action: 'would-delete', reason: cleanupReason(evidence), evidence })
       continue
     }
     const listing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
@@ -2364,7 +2773,11 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
       results.push({ ...base, action: 'error', reason: branchSafety.reason, detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
       continue
     }
-    results.push({ ...base, action: 'deleted', reason: 'merged', evidence, branch_delete_method: branchSafety.branch_delete_method })
+    if (branchSafety.branch_retained) {
+      results.push({ ...base, action: 'skip', reason: branchSafety.branch_retained_reason || 'closed-pr-local-commit-not-recoverable', detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+      continue
+    }
+    results.push({ ...base, action: 'deleted', reason: cleanupReason(evidence), evidence, branch_delete_method: branchSafety.branch_delete_method })
   }
   return results
 }
@@ -2417,10 +2830,10 @@ function cronNextStep(item) {
 }
 
 function renderCron(summary) {
-  const importantReasons = new Set(['empty-repository', 'prunable', 'stale-origin-tracking-ref', 'origin-tracking-ref-prune-query-failed', 'origin-tracking-ref-prune-failed', 'origin-tracking-ref-prune-readback-failed', 'default-branch-dirty', 'dirty', 'locked', 'worktree-in-use', 'worktree-process-check-unavailable', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'aggregate-patch-equivalence-query-failed', 'aggregate-patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
+  const importantReasons = new Set(['empty-repository', 'prunable', 'stale-origin-tracking-ref', 'origin-tracking-ref-prune-query-failed', 'origin-tracking-ref-prune-failed', 'origin-tracking-ref-prune-readback-failed', 'default-branch-dirty', 'dirty', 'locked', 'worktree-in-use', 'worktree-process-check-unavailable', 'ignored-files-query-failed', 'ignored-files-query-failed-after-quarantine', 'ignored-files-clean-failed', 'ignored-files-clean-unverified', 'worktree-state-changed-after-ignored-clean', 'missing-origin', 'non-github-origin', 'no-merge-evidence', 'open-pull-request', 'closed-pr-branch-retained', 'closed-pr-local-commit-not-recoverable', 'closed-pr-recovery-ref-check-unavailable', 'closed-pr-evidence-changed-before-remove', 'merge-evidence-unreachable', 'github-query-failed', 'github-invalid-json', 'github-invalid-response', 'git-object-format-unreadable', 'git-object-format-unsupported', 'status-failed', 'candidate-realpath-failed', 'cleanup-lock-path-failed', 'cleanup-lock-unavailable', 'cleanup-lock-initialize-failed', 'cleanup-lock-release-failed', 'worktree-prune-failed', 'worktree-prune-unresolved', 'worktree-list-after-prune-failed', 'branch-head-changed-before-remove', 'patch-equivalence-query-failed', 'patch-equivalence-changed-before-remove', 'aggregate-patch-equivalence-query-failed', 'aggregate-patch-equivalence-changed-before-remove', 'worktree-identity-changed-before-remove', 'worktree-registration-fence-failed', 'worktree-registration-fence-release-failed', 'worktree-registration-identity-failed', 'worktree-registration-changed-after-quarantine', 'worktree-content-lock-failed', 'worktree-content-lock-release-failed', 'worktree-quarantine-move-failed', 'worktree-head-or-branch-changed-after-quarantine', 'status-recheck-failed-before-remove', 'worktree-became-dirty-before-remove', 'worktree-remove-failed', 'worktree-remove-unverified', 'branch-created-during-cleanup', 'branch-head-changed-during-cleanup', 'branch-still-used', 'compose-query-failed', 'compose-inspect-failed', 'compose-identity-mismatch', 'compose-down-failed', 'compose-containers-still-running'])
   const report = summary.results.filter((item) => item.action === 'deleted' || item.action === 'error' || item.severity === 'warn' || importantReasons.has(item.reason))
   if (report.length === 0) return '[SILENT]\n'
-  const lines = ['## merged worktree cleanup']
+  const lines = ['## repository cleanup']
   for (const item of report) {
     const target = resultTarget(item)
     const evidence = item.evidence?.pr ? ` (${item.evidence.pr})` : ''
@@ -2492,7 +2905,7 @@ async function main() {
   if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`)
   else if (cron) process.stdout.write(renderCron(summary))
   else {
-    process.stdout.write(`Merged worktree cleanup (${summary.mode}): ${summary.repositories_checked} repos, ${summary.deleted} worktrees deleted, ${summary.origin_tracking_refs_pruned} origin tracking refs pruned, ${summary.would_delete} would delete, ${summary.would_prune_origin_tracking_refs} origin refs would prune, ${summary.errors} errors\n`)
+    process.stdout.write(`Repository cleanup (${summary.mode}): ${summary.repositories_checked} repos, ${summary.deleted} worktrees deleted, ${summary.origin_tracking_refs_pruned} origin tracking refs pruned, ${summary.would_delete} would delete, ${summary.would_prune_origin_tracking_refs} origin refs would prune, ${summary.errors} errors\n`)
     for (const item of results) process.stdout.write(`${item.action.toUpperCase()} ${resultTarget(item)}: ${item.reason}\n`)
   }
   process.exitCode = summary.errors > 0 ? 1 : 0
