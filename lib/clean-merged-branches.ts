@@ -1850,16 +1850,6 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: 'ignored-files-query-failed', detail: commandDiagnostic('git', ['-C', candidate, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignoredBeforeQuarantine) })
       continue
     }
-    const processUsage = await processUsesWorktree(realCandidate)
-    if (!processUsage.ok) {
-      results.push({ ...base, action: 'skip', reason: 'worktree-process-check-unavailable', detail: processUsage.error, next_action: processNextAction('worktree-process-check-unavailable') })
-      continue
-    }
-    if (processUsage.used) {
-      results.push({ ...base, action: 'skip', reason: 'worktree-in-use', detail: `pid ${processUsage.pid} uses ${processUsage.location}`, next_action: processNextAction('worktree-in-use') })
-      continue
-    }
-
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
     let evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead } : null
     if (!evidence) {
@@ -1872,6 +1862,16 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     }
     if (!evidence) {
       results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
+      continue
+    }
+
+    const processUsage = await processUsesWorktree(realCandidate)
+    if (!processUsage.ok) {
+      results.push({ ...base, action: 'skip', reason: 'worktree-process-check-unavailable', detail: processUsage.error, next_action: processNextAction('worktree-process-check-unavailable') })
+      continue
+    }
+    if (processUsage.used) {
+      results.push({ ...base, action: 'skip', reason: 'worktree-in-use', detail: `pid ${processUsage.pid} uses ${processUsage.location}`, next_action: processNextAction('worktree-in-use') })
       continue
     }
     const refBeforeRemove = git(realRepo, ['rev-parse', '--verify', item.branchRef])
@@ -2394,7 +2394,7 @@ function cronCause(item) {
 }
 
 function processNextAction(reason: string) {
-  if (reason === 'worktree-process-check-unavailable') return '対象processが終了するか確認可能な状態になってから再実行してください'
+  if (reason === 'worktree-process-check-unavailable') return '/procのアクセス制限が解消したか、対象processの状態を確認できる環境で再実行してください'
   if (reason === 'worktree-in-use') return '対象worktreeを使用中のprocessがあるため削除をskipしました。process終了後に再実行してください'
   if (reason === 'worktree-process-check-failed') return 'quarantine pathとworktree registrationを確認し、安全な復旧手順を判断してください'
   return null

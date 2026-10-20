@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync, spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -329,7 +329,63 @@ test('skips deleting a worktree when a process cannot be inspected', { skip: pro
     assert.equal(summary.errors, 0)
     assert.equal(summary.skipped, 1)
     assert.equal(summary.results.some((item) => item.action === 'skip' && item.reason === 'worktree-process-check-unavailable'), true)
-    assert.equal(summary.results.find((item) => item.action === 'skip')?.next_action, '対象processが終了するか確認可能な状態になってから再実行してください')
+    assert.equal(summary.results.find((item) => item.action === 'skip')?.next_action, '/procのアクセス制限が解消したか、対象processの状態を確認できる環境で再実行してください')
+    assert.equal(existsSync(worktree), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    if (activeProcess && activeProcess.exitCode === null && activeProcess.signalCode === null) {
+      activeProcess.kill('SIGKILL')
+      await new Promise((resolve) => activeProcess.once('close', resolve))
+    }
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('does not scan process use for a worktree without merge evidence', {
+  skip: process.platform !== 'linux' || !run('which', ['ssh-agent']).stdout.trim(),
+}, async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unmerged-process-check-'))
+  let activeProcess
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const socketPath = path.join(fixtureRoot, 'ssh-agent.sock')
+    activeProcess = spawn(run('which', ['ssh-agent']).stdout.trim(), ['-D', '-a', socketPath], {
+      cwd: worktree,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    await new Promise((resolve, reject) => {
+      activeProcess.once('spawn', resolve)
+      activeProcess.once('error', reject)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(activeProcess.exitCode, null, 'ssh-agent should remain alive during the cleanup check')
+    let cwdReadError
+    try {
+      await readlink(`/proc/${activeProcess.pid}/cwd`)
+    } catch (error) {
+      cwdReadError = error
+    }
+    if (cwdReadError?.code !== 'EACCES') {
+      t.skip('ssh-agent cwd is inspectable here; cannot exercise the unreadable-process path')
+      return
+    }
+
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const fakeGh = path.join(fakeBin, 'gh')
+    await writeFile(fakeGh, '#!/bin/sh\nif [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf "[]\\n"; exit 0; fi\nexit 1\n')
+    await chmod(fakeGh, 0o755)
+    const fakeDocker = path.join(fakeBin, 'docker')
+    await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
+    await chmod(fakeDocker, 0o755)
+    const result = run(entrypoint, ['--root', fixtureRoot, '--default-branch', 'main', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'dry-run should report a skipped unmerged worktree')
+    const summary = JSON.parse(result.stdout)
+    const candidate = summary.results.find((item) => item.branch === 'feature')
+    assert.equal(candidate?.reason, 'merge-evidence-not-found')
+    assert.equal(summary.would_delete, 0)
     assert.equal(existsSync(worktree), true)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
   } finally {
