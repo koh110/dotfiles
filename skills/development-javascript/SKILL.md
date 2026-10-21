@@ -3,15 +3,6 @@ name: development-javascript
 description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creating Node.js CLI tools, or modifying package.json. Enforces coding style, module conventions, package.json standards, and Node.js CLI tool patterns.'
 ---
 
-## General Guidelines (must)
-
-- classを利用した設計を避ける
-  - 関数とオブジェクトリテラルを組み合わせたモジュールパターンを利用する
-- import/requireは相対パスを利用する
-- import/requireでindexを省略しない
-- Array.prototype.forEachの利用を禁じる
-  - for...ofやforループを利用する
-
 ## Lint and Format (must)
 
 - `.ts` / `.js` を変更したら、完了前にprojectのroot(package.jsonのあるdirectory)で次を実行し、formatとlintを流す
@@ -22,37 +13,14 @@ node <このskillのdirectory>/scripts/check.ts [files...]
 
 - filesを省略するとgitの変更ファイル(未追跡を含む)を対象に、`vp fmt`(書き込み) → `vp lint` の順で実行する。`--check` を付けるとformatを書き込まず確認だけ行う
 - projectにlint/format設定(`vite.config.*` の `lint`/`fmt`、oxlint/oxfmt、eslint/prettier/biome/dprintの設定ファイル、またはそれらのpackageへの依存)がある場合はproject設定を優先する。vp以外のtoolの場合はscriptがその旨を表示してskipするので、projectのscriptでlint/formatを実行する
-- project設定が無い場合はskillの設定(`lint/oxfmt.json`、`lint/oxlint.json`、`lint/plugin.mjs`)を使う。このskillのguidelineのうち機械判定できるものはここで検出される
+- project設定が無い場合はskillの設定(`lint/oxfmt.json`、`lint/oxlint.json`、`lint/plugin.mjs`)を使う
+- code style(引用符、セミコロン、関数定義の形式、arrow functionの書き方、変数化)と、lintで検出できるルール(class、import path、forEach、`process.env`、`describe`、引数parser、`interface`、type assertion、返り値の型、`any`、filterの `is`)は文章で定義せず、skillのlint設定を正とする。対応ruleは `lint/oxlint.json` を参照
 - errorはすべて修正する。warn(`js-skill/no-single-use-variable`、`js-skill/no-filter-type-predicate`)は判断を伴うため、該当箇所を見直し、残す場合は理由を説明できる状態にする
+- disable commentでerrorを抑制してよいのは、外部ライブラリの型定義が不完全な場合など正当な理由があるときだけとし、理由をコメントに明記する
 - projectにvite-plusが無い場合、scriptは `npx -p vite-plus@1 vp` で取得する(`npx vp` はplaceholder packageを実行してしまうので使わない)。sandboxで `~/.npm/_npx` に書けず失敗した場合はsandbox外で再実行する
-
-## Style Guidelines (should)
-
-`'`・セミコロンはformat(`lint/oxfmt.json`)で、function定義・arrow function・変数化はlint(`func-style`、`arrow-body-style`、`js-skill/no-single-use-variable`)で検出する。
-
-- `"` より `'` を優先して利用する
-- 文末のセミコロンは省略する
-- 関数定義はarrow functionよりnormal functionを優先する
-  - filter, map, reduceなどのcallback関数はarrow functionを利用する
-- arrow functionを利用する場合は改行, `{}`, `return` を省略せずに記述する
-- 参照数が1つならば不必要に変数化を行わない
-
-上記スタイルをすべて満たす例:
-
-```typescript
-function listActiveNames(users: User[]) {
-  const active = users.filter((user) => {
-    return user.active
-  })
-  return active.map((user) => {
-    return user.name
-  })
-}
-```
 
 ## Environment Variables
 
-- `process.env` を各所で参照することを禁じる
 - 環境変数は `config.ts` または `config.js` からのみ読み取る
 - 他のモジュールは `config` を import して値を参照する
 
@@ -110,12 +78,7 @@ RUN npm install --min-release-age=7
 
 ## Test Guidelines
 
-- `describe` を利用しない。`test` をファイルのルートレベルに記述する
-- テストをグルーピングしたい場合は `describe` ではなくテストファイル自体を分離する
-- グローバル setup ファイル (`setup.ts` / `globalSetup` 等) でモジュールをモック化しない
-  - グローバルモックは依存関係を不可視にし、特定テストで実物が必要になった際の解除 (unmock) が複雑化する
-  - モックが必要なテストファイルに `vi.mock(...)` 等の mock を記述して局所化する
-  - 同じモックを複数ファイルで使う場合は、共通の mock factory を関数として export し各テストファイルから呼び出す
+- 同じモックを複数のテストファイルで使う場合は、共通の mock factory を関数として export し各テストファイルから呼び出す
 - DBや外部リソースを共有するテスト同士の干渉を防ぐため「並列耐性」のある形で記述する
   - 同一ファイル内で固有のprefixを共有することを禁じる。テスト毎に `task.id` などのtestごとに unique となる値を prefix として利用し、seed を分離する
   - `beforeAll` で共通の seed データを作成することを禁じる。`beforeAll` は接続と必要最小限の truncate のみに留め、seed は各テスト内で `task.id` prefix を付けて作成する
@@ -124,23 +87,16 @@ RUN npm install --min-release-age=7
 
 ## TypeScript Guidelines
 
-- Prefer `type` over `interface`
-- type assertion を禁じる
 - 既に存在する型は再定義せず推論で導出し再定義を禁じる（対象を限らずすべての型に適用）
   - 詳細は [references/type-inference.md](references/type-inference.md) を参照
-- functionの返り値は指定せず推論に任せる
 - baseUrlを利用しない
 - npm workspaces monorepoで他packageを参照する場合、tsconfigの `paths` エイリアスを禁じる
   - `paths` はpackage.jsonの `exports` マップ検証をバイパスし、存在しないsubpath importがコンパイルを通って実行時の `ERR_PACKAGE_PATH_NOT_EXPORTED` で初めて発覚する
   - 代わりにProject References（参照先packageは `composite: true` と `declarationMap: true`）に一本化する
 - 可能な場合は必ず `as const` を記述する
-- `any` 型の利用を禁じる
-  - やむをえない場合は `unknown` 型を利用し、type guardで型を絞り込む
-  - 外部ライブラリの型定義が不完全な場合のみ、コメントで理由を明記した上で使用を許可する
 - TypeScriptファイルを直接実行する場合はNode.jsのstrip-typesを利用する
   - `ts-node`, `tsx` の利用を禁じる
   - ref: https://nodejs.org/docs/api/typescript.html
-- Array.prototype.filterではできる限り型推論に任せ `is` を利用しない
 
 ## Node.js CLI Tool Guidelines
 
@@ -148,7 +104,6 @@ Node.js CLIツールを作成する場合は以下に従う。
 
 - ファイルの先頭に `#!/usr/bin/env node` を付与する
 - 引数解析は `node:util` から `parseArgs` をインポートして利用し、手書きパーサは避ける
-  - `commander` などの利用は禁じる
 - TypeScriptで記述し、Node.jsのstrip-typesで実行する
 - subprocess、artifact出力、baseline比較、filesystem cleanup、外部review gateのいずれかを扱う場合は`fail-closed-automation` skillもloadし、そのsubprocess・artifact ownership・TOCTOU規則を適用する
 
@@ -227,5 +182,5 @@ main().catch((err) => {
 ## Mandatory Skill Enforcement
 
 - このskillがloadされたら、変更した `.ts` / `.js` ファイルに対して完了前に `scripts/check.ts` を実行し、errorが0件になるまで修正すること
-- 変更したファイルを完了前に再読し、このskillの禁止事項に違反していないか必ず確認すること。skillのlint設定が適用された場合はlintで判定できない項目(`as const`、型の再定義、テストの並列耐性、Date Handling、Scripting、package.json・tsconfig・npmの設定、Node.js CLI Tool Guidelines)を、project設定が使われた場合はguideline全体を確認対象とする
+- 変更したファイルを完了前に再読し、このskillの禁止事項に違反していないか必ず確認すること。skillのlint設定が適用された場合はlintで判定できない項目(`as const`、型の再定義、テストの並列耐性、Date Handling、Scripting、package.json・tsconfig・npmの設定、Node.js CLI Tool Guidelines)を、project設定が使われた場合はこのSKILL.mdのguideline全体を確認対象とする。project設定が使われた場合、skillのlint設定でのみ定義されたルールは適用せず、projectのlint/format規約に従う
 - skill違反が見つかった場合、その時点で未完了として扱い、説明や完了報告より先に修正すること
