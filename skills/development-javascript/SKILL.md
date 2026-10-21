@@ -12,7 +12,23 @@ description: 'TRIGGER when: creating or editing .ts/.js/.mts/.mjs files, creatin
 - Array.prototype.forEachの利用を禁じる
   - for...ofやforループを利用する
 
+## Lint and Format (must)
+
+- `.ts` / `.js` を変更したら、完了前にprojectのroot(package.jsonのあるdirectory)で次を実行し、formatとlintを流す
+
+```bash
+node <このskillのdirectory>/scripts/check.ts [files...]
+```
+
+- filesを省略するとgitの変更ファイル(未追跡を含む)を対象に、`vp fmt`(書き込み) → `vp lint` の順で実行する。`--check` を付けるとformatを書き込まず確認だけ行う
+- projectにlint/format設定(`vite.config.*` の `lint`/`fmt`、oxlint/oxfmt、eslint/prettier/biome/dprintの設定ファイル、またはそれらのpackageへの依存)がある場合はproject設定を優先する。vp以外のtoolの場合はscriptがその旨を表示してskipするので、projectのscriptでlint/formatを実行する
+- project設定が無い場合はskillの設定(`lint/oxfmt.json`、`lint/oxlint.json`、`lint/plugin.mjs`)を使う。このskillのguidelineのうち機械判定できるものはここで検出される
+- errorはすべて修正する。warn(`js-skill/no-single-use-variable`、`js-skill/no-filter-type-predicate`)は判断を伴うため、該当箇所を見直し、残す場合は理由を説明できる状態にする
+- projectにvite-plusが無い場合、scriptは `npx -p vite-plus@1 vp` で取得する(`npx vp` はplaceholder packageを実行してしまうので使わない)。sandboxで `~/.npm/_npx` に書けず失敗した場合はsandbox外で再実行する
+
 ## Style Guidelines (should)
+
+`'`・セミコロンはformat(`lint/oxfmt.json`)で、function定義・arrow function・変数化はlint(`func-style`、`arrow-body-style`、`js-skill/no-single-use-variable`)で検出する。
 
 - `"` より `'` を優先して利用する
 - 文末のセミコロンは省略する
@@ -210,5 +226,6 @@ main().catch((err) => {
 
 ## Mandatory Skill Enforcement
 
-- このskillがloadされたら、変更した `.ts` / `.js` ファイルを完了前に再読し、このskillの禁止事項に違反していないか必ず確認すること
+- このskillがloadされたら、変更した `.ts` / `.js` ファイルに対して完了前に `scripts/check.ts` を実行し、errorが0件になるまで修正すること
+- 変更したファイルを完了前に再読し、このskillの禁止事項に違反していないか必ず確認すること。skillのlint設定が適用された場合はlintで判定できない項目(`as const`、型の再定義、テストの並列耐性、Date Handling、Scripting、package.json・tsconfig・npmの設定、Node.js CLI Tool Guidelines)を、project設定が使われた場合はguideline全体を確認対象とする
 - skill違反が見つかった場合、その時点で未完了として扱い、説明や完了報告より先に修正すること
