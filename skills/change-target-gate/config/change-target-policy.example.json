@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "repository": "OWNER/REPOSITORY",
-  "defaultBranch": "main",
-  "allowedRepositories": [
-    "OWNER/REPOSITORY"
-  ],
-  "requireManifest": true
-}

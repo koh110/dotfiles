@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ./deploy.ts --all | --claude [--check|--force]  (--check は --claude の drift guard、--force は managed skill の上書き許可)
+// ./deploy.ts --all | --ssh | --git | --tmux | --zsh | --vim | --ghostty | --codex
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +7,6 @@ import { mkdir, cp } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { deployDotfile } from './lib/dotfile-template.ts'
 import { deployCodexConfig } from './lib/codex-config.ts'
-import { deployAgentSkills } from './lib/agent-skills.mjs'
 
 const { values } = parseArgs({
   options: {
@@ -45,72 +44,14 @@ const { values } = parseArgs({
       type: 'boolean',
       default: false,
     },
-    copilot: {
-      type: 'boolean',
-      short: 'c',
-      default: false,
-    },
-    claude: {
-      type: 'boolean',
-      default: false,
-    },
     codex: {
-      type: 'boolean',
-      default: false,
-    },
-    check: {
-      type: 'boolean',
-      default: false,
-    },
-    force: {
       type: 'boolean',
       default: false,
     },
   }
 })
 
-function selectedSkillRuntimes() {
-  const runtimes: ('copilot' | 'claude' | 'codex')[] = []
-  if (values.all || values.copilot) runtimes.push('copilot')
-  if (values.all || values.claude) runtimes.push('claude')
-  if (values.all || values.codex) runtimes.push('codex')
-  return runtimes
-}
-
 async function main() {
-  const skillRuntimes = selectedSkillRuntimes()
-
-  if (values.check) {
-    if (!values.claude) {
-      console.error('--check は --claude 専用です: node deploy.ts --claude --check')
-      process.exitCode = 1
-      return
-    }
-
-    const ok = await deployAgentSkills({
-      sourceDir: join(import.meta.dirname, 'skills'),
-      homeDir: homedir(),
-      runtimes: ['claude'],
-      force: values.force,
-      check: true,
-    })
-    if (!ok) process.exitCode = 1
-    return
-  }
-
-  if (skillRuntimes.length > 0) {
-    const ok = await deployAgentSkills({
-      sourceDir: join(import.meta.dirname, 'skills'),
-      homeDir: homedir(),
-      runtimes: skillRuntimes,
-      force: values.force,
-    })
-    if (!ok) {
-      process.exitCode = 1
-      return
-    }
-  }
-
   await Promise.all([
     (values.all || values.ssh) && ssh(),
     (values.all || values.git) && git(),
