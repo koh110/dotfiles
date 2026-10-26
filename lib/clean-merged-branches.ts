@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { parseArgs } from 'node:util'
 import { loadCleanMergedBranchesConfig } from './clean-merged-branches-config.ts'
-import { aggregatePatchEquivalence as checkAggregatePatchEquivalence } from './aggregate-patch-equivalence.ts'
+import { classifyAggregatePatchFailure, aggregatePatchEquivalence as checkAggregatePatchEquivalence } from './aggregate-patch-equivalence.ts'
 
 const config = loadCleanMergedBranchesConfig()
 
@@ -45,7 +45,7 @@ function git(repo: string, args: string[], options: RunOptions = {}) {
   return run('git', ['-C', repo, ...args], options)
 }
 
-async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null, beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
+async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => Promise<string | null> | string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null, beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
   const command = ['-C', repo, 'update-ref', '--stdin']
   let stdout = ''
   let stderr = ''
@@ -142,7 +142,7 @@ async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: st
       error: `${preCommit.error || 'pre-commit cleanup failed'}${cleanupError}${failed.ok ? '' : `; transaction=${commandDiagnostic('git', command, failed)}`}`,
     }
   }
-  const evidenceError = verifyUnderLock()
+  const evidenceError = await verifyUnderLock()
   if (evidenceError) {
     await abort()
     let cleanupError = ''
@@ -390,7 +390,7 @@ function openPullRequestEvidenceError(repo: string, branchRef: string, evidence:
   return null
 }
 
-function cleanupEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head, checkOpenPullRequest = true) {
+async function cleanupEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head, checkOpenPullRequest = true) {
   if (!isGitObjectId(expectedDefaultHead)) return `invalid expected default ref OID for ${defaultRef}: ${expectedDefaultHead || '<missing>'}`
   const defaultResult = git(repo, ['rev-parse', '--verify', defaultRef])
   if (!defaultResult.ok) return commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', defaultRef], defaultResult)
@@ -413,7 +413,7 @@ function cleanupEvidenceError(repo: string, branchRef: string, expectedHead: str
     return patch.merged ? null : `${branchRef}@${expectedHead} is no longer patch-equivalent to ${defaultRef}`
   }
   if (evidence.method === 'aggregate-patch-equivalence') {
-    const patch = checkAggregatePatchEquivalence(repo, expectedHead, defaultRef, git)
+    const patch = await checkAggregatePatchEquivalence(repo, expectedHead, defaultRef, git, config.environment)
     if (!patch.ok) return patch.error || 'aggregate patch-equivalence query failed'
     if (!patch.merged) return `${branchRef}@${expectedHead} aggregate patch is no longer present in ${defaultRef}`
     if (patch.merge_base !== evidence.merge_base || patch.commit_count !== evidence.commit_count || patch.changed_path_count !== evidence.changed_path_count) {
@@ -460,7 +460,9 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
       if (!refBeforeDelete.ok || refBeforeDelete.stdout.trim() !== expectedHead) {
         outcome = { ok: false, reason: 'branch-head-changed-before-delete', detail: !refBeforeDelete.ok ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], refBeforeDelete) : `${branchRef} changed: ${refBeforeDelete.stdout.trim()} != ${expectedHead}`, branch_delete_method: branchDeleteMethod }
       } else {
-        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, () => cleanupEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead), beforeCommit, allowedWorktreePath, beforeRefCommit, afterAbort)
+        const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, async () => {
+          return cleanupEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead)
+        }, beforeCommit, allowedWorktreePath, beforeRefCommit, afterAbort)
         if (!branchDelete.ok) {
           let restoreDetail = ''
           if (branchDelete.committed) {
@@ -1631,13 +1633,13 @@ type PullRequestEvidenceResult = {
   headRelation: 'exact' | 'ancestor' | null
 } | { ok: false, code: string, error: string, repository?: string, mergeCommit?: string | null }
 type CleanupEvidence =
-  | { method: 'ancestry', default_ref: string, default_head: string, repository?: string, head_ref: string }
-  | { method: 'github-merge-commit', pr: string, number: number, merged_at: string, merge_commit: string, pr_head: string, head_relation: 'exact' | 'ancestor', default_ref: string, default_head: string, repository?: string, head_ref: string }
-  | { method: 'patch-equivalence', default_ref: string, default_head: string, commit_count: number, repository?: string, head_ref: string }
-  | { method: 'aggregate-patch-equivalence', default_ref: string, default_head: string, merge_base: string, commit_count: number, changed_path_count: number, repository?: string, head_ref: string }
+  | { method: 'ancestry', default_ref: string, default_head: string, repository?: string | undefined, head_ref: string }
+  | { method: 'github-merge-commit', pr: string, number: number, merged_at: string, merge_commit: string, pr_head: string, head_relation: 'exact' | 'ancestor', default_ref: string, default_head: string, repository?: string | undefined, head_ref: string }
+  | { method: 'patch-equivalence', default_ref: string, default_head: string, commit_count: number, repository?: string | undefined, head_ref: string }
+  | { method: 'aggregate-patch-equivalence', default_ref: string, default_head: string, merge_base: string, commit_count: number, changed_path_count: number, repository?: string | undefined, head_ref: string }
   | { method: 'closed-pr', pr: string, number: number, state: 'CLOSED', repository: string, head_repository: string, head_ref: string, pr_head: string, branch_head: string, head_relation: 'exact' | 'ancestor', base_ref: string, default_ref: string, default_head: string }
 type CleanupEvidenceResolution =
-  | { ok: false, code: string, error: string, repository?: string, pr_error?: { code: string, detail: string } }
+  | { ok: false, code: string, error: string, repository?: string | undefined, pr_error?: { code: string; detail: string } }
   | { ok: true, evidence: CleanupEvidence | null, skip_reason?: string, detail?: string }
 
 const PULL_REQUEST_BATCH_LIMIT = 1000
@@ -1879,27 +1881,35 @@ function processUsageSkipEvidenceError(repo: string, branchRef: string, expected
   return null
 }
 
-function resolveCleanupEvidence(repo: string, branch: string, head: string, defaultRef: string, defaultHead: string, pullRequestEvidence: ReturnType<typeof createPullRequestLookup>): CleanupEvidenceResolution {
+async function resolveCleanupEvidence(
+  repo: string,
+  branch: string,
+  head: string,
+  defaultRef: string,
+  defaultHead: string,
+  pullRequestEvidence: ReturnType<typeof createPullRequestLookup>,
+) {
   const pr = pullRequestEvidence(branch, head)
   const protection = openPullRequestGuard(branch, pr)
-  if (!protection.ok) return protection
+  if (!protection.ok) return protection satisfies CleanupEvidenceResolution
   if (protection.skip_reason) {
     return {
       ok: true,
       evidence: null,
       skip_reason: protection.skip_reason,
       detail: protection.detail,
-    }
+    } as const satisfies CleanupEvidenceResolution
   }
   if (pr.ok && pr.match) {
-    if (!pr.mergeCommit || !pr.prHead || !pr.headRelation) return { ok: false, code: 'github-invalid-response', error: 'merged PR evidence is missing its merge commit or head relationship', repository: pr.repository }
+    const mergedAt = pr.match.mergedAt
+    if (!pr.mergeCommit || !pr.prHead || !pr.headRelation || !mergedAt) return { ok: false, code: 'github-invalid-response', error: 'merged PR evidence is missing its merge commit, timestamp, or head relationship', repository: pr.repository } as const satisfies CleanupEvidenceResolution
     return {
       ok: true,
       evidence: {
         method: 'github-merge-commit',
         pr: pr.match.url,
         number: pr.match.number,
-        merged_at: pr.match.mergedAt,
+        merged_at: mergedAt,
         merge_commit: pr.mergeCommit,
         pr_head: pr.prHead,
         head_relation: pr.headRelation,
@@ -1908,7 +1918,7 @@ function resolveCleanupEvidence(repo: string, branch: string, head: string, defa
         repository: pr.repository,
         head_ref: pr.match.headRefName,
       },
-    }
+    } as const satisfies CleanupEvidenceResolution
   }
 
   const hasClosedPr = pr.ok && Boolean(pr.closedMatch)
@@ -1921,9 +1931,9 @@ function resolveCleanupEvidence(repo: string, branch: string, head: string, defa
         error: `${patch.error}; PR evidence unavailable: ${pr.error}`,
         repository: pr.repository,
         pr_error: { code: pr.code, detail: pr.error },
-      }
+      } as const satisfies CleanupEvidenceResolution
     }
-    return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error }
+    return { ok: false, code: 'patch-equivalence-query-failed', error: patch.error || 'patch-equivalence query failed' } as const satisfies CleanupEvidenceResolution
   }
   if (patch.ok && patch.merged) {
     return {
@@ -1936,22 +1946,35 @@ function resolveCleanupEvidence(repo: string, branch: string, head: string, defa
         repository: pr.repository,
         head_ref: branch,
       },
-    }
+    } as const satisfies CleanupEvidenceResolution
   }
 
-  const aggregate = checkAggregatePatchEquivalence(repo, head, defaultRef, git)
-  if (!aggregate.ok && !hasClosedPr) {
-    const error = !aggregate.error ? 'aggregate patch-equivalence query failed' : aggregate.error
-    if (!pr.ok) {
+  const aggregate = await checkAggregatePatchEquivalence(repo, head, defaultRef, git, config.environment)
+  const aggregateFailure = classifyAggregatePatchFailure(aggregate, hasClosedPr)
+  if (aggregateFailure.action === 'error') {
+    if (!pr.ok && aggregateFailure.code === 'aggregate-patch-equivalence-query-failed') {
       return {
         ok: false,
         code: 'aggregate-patch-equivalence-query-failed',
-        error: `${error}; PR evidence unavailable: ${pr.error}`,
+        error: `${aggregateFailure.error}; PR evidence unavailable: ${pr.error}`,
         repository: pr.repository,
         pr_error: { code: pr.code, detail: pr.error },
-      }
+      } as const satisfies CleanupEvidenceResolution
     }
-    return { ok: false, code: 'aggregate-patch-equivalence-query-failed', error }
+    if (!pr.ok) {
+      return {
+        ok: false,
+        code: aggregateFailure.code,
+        error: aggregateFailure.error,
+        repository: pr.repository,
+        pr_error: { code: pr.code, detail: pr.error },
+      } as const satisfies CleanupEvidenceResolution
+    }
+    return {
+      ok: false,
+      code: aggregateFailure.code,
+      error: aggregateFailure.error,
+    } as const satisfies CleanupEvidenceResolution
   }
   if (aggregate.ok && aggregate.merged) {
     return {
@@ -1966,11 +1989,11 @@ function resolveCleanupEvidence(repo: string, branch: string, head: string, defa
         repository: pr.repository,
         head_ref: branch,
       },
-    }
+    } as const satisfies CleanupEvidenceResolution
   }
   if (pr.ok && pr.closedMatch) {
     const headRepository = pr.closedMatch.headRepository?.nameWithOwner
-    if (!headRepository || !pr.closedHead || !pr.headRelation) return { ok: false, code: 'github-invalid-response', error: 'closed PR evidence is missing its head repository or commit relationship', repository: pr.repository }
+    if (!headRepository || !pr.closedHead || !pr.headRelation) return { ok: false, code: 'github-invalid-response', error: 'closed PR evidence is missing its head repository or commit relationship', repository: pr.repository } as const satisfies CleanupEvidenceResolution
     return {
       ok: true,
       evidence: {
@@ -1988,10 +2011,10 @@ function resolveCleanupEvidence(repo: string, branch: string, head: string, defa
         default_ref: defaultRef,
         default_head: defaultHead,
       },
-    }
+    } as const satisfies CleanupEvidenceResolution
   }
   if (!pr.ok) return pr
-  return { ok: true, evidence: null }
+  return { ok: true, evidence: null } as const satisfies CleanupEvidenceResolution
 }
 
 async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null, managedRoot: string | null) {
@@ -2216,9 +2239,9 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
     let evidence: CleanupEvidence | null = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: branchName } : null
     if (!evidence) {
-      const resolved = resolveCleanupEvidence(realRepo, branchName, item.head || '', defaultInfo.ref, defaultHead, pullRequestEvidence)
+      const resolved = await resolveCleanupEvidence(realRepo, branchName, item.head || '', defaultInfo.ref, defaultHead, pullRequestEvidence)
       if (!resolved.ok) {
-        results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
+        results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: ('pr_error' in resolved ? resolved.pr_error : undefined) })
         continue
       }
       if (resolved.skip_reason) {
@@ -2266,14 +2289,14 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
     if (evidence.method === 'patch-equivalence') {
-      const patchError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      const patchError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (patchError) {
         results.push({ ...base, action: 'error', reason: 'patch-equivalence-changed-before-remove', detail: patchError, evidence })
         continue
       }
     }
     if (evidence.method === 'aggregate-patch-equivalence') {
-      const patchError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      const patchError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (patchError) {
         results.push({ ...base, action: 'error', reason: 'aggregate-patch-equivalence-changed-before-remove', detail: patchError, evidence })
         continue
@@ -2299,7 +2322,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
     if (evidence.method === 'closed-pr') {
-      const closedPrError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+      const closedPrError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
       if (closedPrError) {
         results.push({ ...base, action: 'error', reason: 'closed-pr-evidence-changed-before-remove', detail: closedPrError, evidence })
         continue
@@ -2456,7 +2479,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: 'remote-default-changed-after-quarantine', detail: `${remoteAfterQuarantine.ok ? `${remoteAfterQuarantine.oid} != ${defaultHead}` : remoteAfterQuarantine.error}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
-    const mergeEvidenceAfterQuarantineError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead, evidence.method !== 'ancestry')
+    const mergeEvidenceAfterQuarantineError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead, evidence.method !== 'ancestry')
     const mergeEvidenceStillValid = mergeEvidenceAfterQuarantineError === null
     if (!mergeEvidenceStillValid) {
       const restored = await restoreQuarantine()
@@ -2531,7 +2554,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         // Reported by the post-clean identity check below.
       }
       const remoteAfterClean = remoteDefaultState(realRepo, defaultInfo.name, Boolean(explicitDefaultBranch))
-      const mergeEvidenceAfterClean = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead) === null
+      const mergeEvidenceAfterClean = (await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)) === null
       const postCleanIssues = []
       if (!headAfterClean.ok || headAfterClean.stdout.trim() !== item.head) postCleanIssues.push(!headAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'rev-parse', '--verify', 'HEAD'], headAfterClean) : `HEAD changed after ignored cleanup: ${headAfterClean.stdout.trim()} != ${item.head}`)
       if (!branchAfterClean.ok || branchAfterClean.stdout.trim() !== item.branchRef) postCleanIssues.push(!branchAfterClean.ok ? commandDiagnostic('git', ['-C', quarantine, 'symbolic-ref', '-q', 'HEAD'], branchAfterClean) : `branch changed after ignored cleanup: ${branchAfterClean.stdout.trim()} != ${item.branchRef}`)
@@ -2614,7 +2637,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         }
       }
       if (!(skipProcessUseCheck && evidence.method === 'closed-pr')) {
-        const latestLocalEvidenceError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead, false)
+        const latestLocalEvidenceError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead, false)
         if (latestLocalEvidenceError) {
           return {
             ok: false,
@@ -2646,7 +2669,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         if (finalProcessSkipError && evidence.method === 'closed-pr') {
           return { ok: false, reason: 'closed-pr-evidence-changed-before-remove', error: finalProcessSkipError }
         }
-        const latestEvidenceError = cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
+        const latestEvidenceError = await cleanupEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, evidence, defaultHead)
         if (latestEvidenceError) {
           return {
             ok: false,
@@ -2805,10 +2828,10 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
     const ancestry = git(realRepo, ['merge-base', '--is-ancestor', oid, defaultInfo.ref]).ok
     let evidence: CleanupEvidence | null = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: base.branch } : null
     if (!evidence) {
-      const resolved = resolveCleanupEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, pullRequestEvidence)
+      const resolved = await resolveCleanupEvidence(realRepo, base.branch, oid, defaultInfo.ref, defaultHead, pullRequestEvidence)
       if (!resolved.ok) {
         if (resolved.code === 'patch-equivalence-query-failed' || resolved.code === 'aggregate-patch-equivalence-query-failed') {
-          results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: resolved.pr_error })
+          results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: ('pr_error' in resolved ? resolved.pr_error : undefined) })
         } else if (resolved.repository && resolved.code !== 'merge-evidence-unreachable') {
           results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository })
         } else {
@@ -2843,7 +2866,7 @@ async function cleanupUnattachedMergedBranches(realRepo: any, apply: any, explic
       results.push({ ...base, action: 'error', reason: remoteBeforeDelete.ok ? 'remote-default-changed-before-delete' : remoteBeforeDelete.code, detail: remoteBeforeDelete.ok ? `${remoteBeforeDelete.oid} != ${defaultHead}` : remoteBeforeDelete.error, evidence })
       continue
     }
-    const evidenceError = cleanupEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence, defaultHead, !apply || evidence.method !== 'ancestry')
+    const evidenceError = await cleanupEvidenceError(realRepo, ref, oid, defaultInfo.ref, evidence, defaultHead, !apply || evidence.method !== 'ancestry')
     if (evidenceError) {
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-before-delete', detail: evidenceError, evidence })
       continue
