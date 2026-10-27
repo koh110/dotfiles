@@ -195,6 +195,601 @@ async function stopInjectedProcess(pidFile) {
   }
 }
 
+function noOpenPullRequestFixture(head, overrides = {}) {
+  return {
+    number: 17,
+    url: 'https://github.com/owner/repo/pull/17',
+    state: 'OPEN',
+    mergedAt: null,
+    headRefName: 'feature',
+    headRefOid: head,
+    baseRefName: 'main',
+    headRepository: { nameWithOwner: 'owner/repo' },
+    mergeCommit: null,
+    ...overrides,
+  }
+}
+
+test('requires exactly one explicit --root occurrence for no-open-PR mode', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-duplicate-root-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, ghLog, [])
+
+    for (const rootArgs of [
+      ['--root', fixtureRoot, '--root', fixtureRoot],
+      [`--root=${fixtureRoot}`, '--root', path.join(fixtureRoot, 'other')],
+    ]) {
+      const result = run(entrypoint, ['--repo', repo, ...rootArgs, '--prune-no-open-pr-worktrees', '--json'], {
+        env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+      })
+      assert.equal(result.status, 2, result.stderr || result.stdout || result.error || 'duplicate --root must be rejected')
+      assert.match(result.stderr, /requires exactly one explicit --root/)
+      assert.equal(existsSync(worktree), true)
+    }
+    assert.equal((await ghCalls(ghLog)).length, 0)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('reports no-open-PR dry-run safety policy in human-readable output', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-text-output-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, ghLog, [])
+    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error)
+    assert.match(result.stdout, /local branches are preserved/i)
+    assert.match(result.stdout, /process-use checks are not run during dry-run/i)
+    assert.match(result.stdout, /ignored node_modules paths are removed.*other ignored content is retained and causes a skip/i)
+    assert.equal(existsSync(worktree), true)
+    assert.equal((await ghCalls(ghLog)).length, 1)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps unmerged worktrees by default and prunes explicit non-PR worktrees without deleting their branch', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-non-pr-worktrees-dry-run-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    git(repo, ['branch', 'already-merged', 'main'])
+    const mainHead = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/origin/stale-no-open-pr', mainHead])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const defaultLog = path.join(fixtureRoot, 'gh-default.log')
+    await writeLoggingGh(fakeBin, defaultLog, [])
+    const options = {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      },
+    }
+
+    const defaultRun = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--json'], options)
+    assert.equal(defaultRun.status, 0, defaultRun.stderr || defaultRun.stdout || defaultRun.error || 'process did not start')
+    const defaultSummary = JSON.parse(defaultRun.stdout)
+    const defaultResult = defaultSummary.results.find((item) => item.path === worktree)
+    assert.equal(Object.hasOwn(defaultSummary, 'prune_no_open_pr_worktrees'), false)
+    assert.equal(defaultResult?.action, 'skip')
+    assert.equal(defaultResult?.reason, 'merge-evidence-not-found')
+    assert.equal(defaultSummary.results.some((item) => item.target === 'remote-tracking-ref' && item.branch === 'origin/stale-no-open-pr' && item.action === 'would-prune'), true)
+    assert.equal(defaultSummary.results.some((item) => item.target === 'branch' && item.branch === 'already-merged' && item.action === 'would-delete'), true)
+    assert.ok((await ghCalls(defaultLog)).every((call) => /--author @me(?: |$)/.test(call)))
+
+    const enabledLog = path.join(fixtureRoot, 'gh-enabled.log')
+    await writeLoggingGh(fakeBin, enabledLog, [])
+    const enabledRun = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], options)
+    assert.equal(enabledRun.status, 0, enabledRun.stderr || enabledRun.stdout || enabledRun.error || 'process did not start')
+    const enabledSummary = JSON.parse(enabledRun.stdout)
+    const enabledResult = enabledSummary.results.find((item) => item.path === worktree)
+    assert.equal(enabledSummary.prune_no_open_pr_worktrees, true)
+    assert.equal(enabledSummary.no_open_pr_policy?.local_branches, 'preserved')
+    assert.equal(enabledSummary.no_open_pr_policy?.process_usage_check, 'not-run-dry-run')
+    assert.match(enabledSummary.no_open_pr_policy?.ignored_content || '', /node_modules/)
+    assert.equal(enabledSummary.would_delete, 1)
+    assert.equal(enabledResult?.action, 'would-delete')
+    assert.equal(enabledResult?.reason, 'no-open-pr')
+    assert.equal(enabledResult?.evidence?.method, 'no-open-pr')
+    assert.equal(enabledResult?.branch_will_be_deleted, false)
+    assert.equal(enabledResult?.branch_will_be_preserved, true)
+    assert.equal(enabledResult?.process_usage_check, 'not-run-dry-run')
+    assert.equal(enabledSummary.results.some((item) => item.target === 'branch'), false)
+    assert.equal(enabledSummary.results.some((item) => item.target === 'remote-tracking-ref'), false)
+    const enabledCalls = await ghCalls(enabledLog)
+    assert.ok(enabledCalls.length > 0)
+    assert.ok(enabledCalls.every((call) => !/--author/.test(call) && /--head feature(?: |$)/.test(call)), JSON.stringify(enabledCalls))
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/remotes/origin/stale-no-open-pr'])
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/already-merged'])
+    assert.equal(existsSync(worktree), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps a no-open-PR cleanup candidate when any author has an open PR, including forks', async () => {
+  for (const [label, headRepository] of [['fork', { nameWithOwner: 'contributor/repo' }], ['deleted-fork', null], ['same-repository', { nameWithOwner: 'owner/repo' }]]) {
+    const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), `clean-no-open-pr-${label}-protection-`))
+    try {
+      const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+      const head = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+      const fakeBin = path.join(fixtureRoot, 'bin')
+      await mkdir(fakeBin, { recursive: true })
+      const ghLog = path.join(fixtureRoot, 'gh.log')
+      await writeLoggingGh(fakeBin, ghLog, [noOpenPullRequestFixture(head, { headRepository })])
+      for (const args of [['--json'], ['--apply', '--json']]) {
+        const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', ...args], {
+          env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+        })
+
+        assert.equal(result.status, 0, `${label}: ${result.stderr || result.stdout || result.error || 'process did not start'}`)
+        const summary = JSON.parse(result.stdout)
+        const candidate = summary.results.find((item) => item.path === worktree)
+        assert.equal(candidate?.action, 'skip', label)
+        assert.equal(candidate?.reason, 'open-pull-request', label)
+        assert.match(candidate?.detail || '', /open PR #17 protects feature/)
+        assert.equal(existsSync(worktree), true)
+        assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+      }
+      const calls = await ghCalls(ghLog)
+      assert.ok(calls.length > 0)
+      assert.ok(calls.every((call) => !/--author/.test(call) && /--head feature(?: |$)/.test(call)), JSON.stringify(calls))
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
+  }
+})
+
+test('fails closed when the no-open-PR query fails, is invalid, or reaches its limit', async () => {
+  const cases = [
+    ['query-failure', 'github-query-failed', async (fakeBin) => {
+      await writeLoggingGh(fakeBin, path.join(fakeBin, '..', 'gh.log'), [])
+      await writeFile(path.join(fakeBin, 'gh'), '#!/bin/sh\nprintf "%s\\n" "simulated gh failure" >&2\nexit 42\n')
+    }],
+    ['invalid-response', 'github-invalid-response', async (fakeBin) => {
+      await writeLoggingGh(fakeBin, path.join(fakeBin, '..', 'gh.log'), [])
+      await writeFile(path.join(fakeBin, 'gh'), '#!/bin/sh\nprintf "%s\\n" "{}"\n')
+    }],
+    ['truncated', 'github-query-truncated', async (fakeBin, head) => {
+      const pulls = Array.from({ length: 100 }, (_, index) => noOpenPullRequestFixture(head, {
+        number: index + 1,
+        url: `https://github.com/owner/repo/pull/${index + 1}`,
+        state: 'CLOSED',
+      }))
+      await writeLoggingGh(fakeBin, path.join(fakeBin, '..', 'gh.log'), pulls)
+    }],
+  ]
+  for (const [label, reason, installGh] of cases) {
+    const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), `clean-no-open-pr-${label}-`))
+    try {
+      const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+      const head = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+      const fakeBin = path.join(fixtureRoot, 'bin')
+      await mkdir(fakeBin, { recursive: true })
+      await installGh(fakeBin, head)
+      await chmod(path.join(fakeBin, 'gh'), 0o755)
+      for (const args of [['--json'], ['--apply', '--json']]) {
+        const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', ...args], {
+          env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+        })
+
+        assert.equal(result.status, 1, `${label}: ${result.stderr || result.stdout || result.error || 'process did not start'}`)
+        const summary = JSON.parse(result.stdout)
+        const candidate = summary.results.find((item) => item.path === worktree)
+        assert.equal(candidate?.action, 'error', label)
+        assert.equal(candidate?.reason, reason, label)
+        assert.equal(summary.would_delete, 0)
+        assert.equal(summary.deleted, 0)
+        assert.equal(existsSync(worktree), true)
+        assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), head)
+      }
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
+  }
+})
+
+test('allows install-generated node_modules in no-open-PR mode', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-node-modules-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'node_modules/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'ignore install-generated dependencies'])
+    const installedFile = path.join(worktree, 'node_modules', 'example-package', 'index.js')
+    await mkdir(path.dirname(installedFile), { recursive: true })
+    await writeFile(installedFile, 'module.exports = true\n')
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, path.join(fixtureRoot, 'gh.log'), [])
+    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    const candidate = summary.results.find((item) => item.path === worktree)
+    assert.equal(candidate?.action, 'would-delete')
+    assert.equal(candidate?.reason, 'no-open-pr')
+    assert.equal(candidate?.branch_will_be_deleted, false)
+    assert.equal(candidate?.branch_will_be_preserved, true)
+    assert.equal(candidate?.ignored_files, '1 ignored path')
+    assert.equal(candidate?.ignored_files_will_be_removed, '1 ignored path')
+    assert.equal(existsSync(installedFile), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('retains non-install-generated ignored content on a no-open-PR cleanup candidate', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-ignored-files-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'node_modules/\nignored-cache/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'add ignored cache rule'])
+    const installedFile = path.join(worktree, 'node_modules', 'example-package', 'index.js')
+    await mkdir(path.dirname(installedFile), { recursive: true })
+    await writeFile(installedFile, 'module.exports = true\n')
+    const ignoredPath = path.join(worktree, 'ignored-cache', 'keep.txt')
+    await mkdir(path.dirname(ignoredPath), { recursive: true })
+    await writeFile(ignoredPath, 'keep me\n')
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, path.join(fixtureRoot, 'gh.log'), [])
+    for (const args of [['--json'], ['--apply', '--json']]) {
+      const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', ...args], {
+        env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+      })
+
+      assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+      const summary = JSON.parse(result.stdout)
+      const candidate = summary.results.find((item) => item.path === worktree)
+      assert.equal(candidate?.action, 'skip')
+      assert.equal(candidate?.reason, 'ignored-files-present')
+      assert.equal(existsSync(ignoredPath), true)
+      assert.equal(existsSync(installedFile), true)
+      assert.equal(existsSync(worktree), true)
+      assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores and retains non-install-generated ignored content that appears before final removal in no-open-PR mode', async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-late-ignored-content-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'ignored-cache/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'ignore local generated cache'])
+    const ignoredPathResult = run('git', ['-C', worktree, 'check-ignore', '--quiet', '--no-index', 'ignored-cache/late.txt'])
+    assert.equal(ignoredPathResult.status, 0, 'late ignored-content fixture must ignore ignored-cache/late.txt')
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, ghLog, [])
+    // 4回目のPR照会は削除直前の全author再検証で、その後の最終ignored content検査だけが検出できる。
+    await writeFile(path.join(fakeBin, 'gh'), `#!/bin/sh
+count=0
+if [ -f '${ghLog}' ]; then
+  count=$(wc -l < '${ghLog}')
+fi
+count=$((count + 1))
+printf '%s\\n' "$*" >> '${ghLog}'
+if [ "$count" -eq 4 ]; then
+  for quarantine in '${repo}/.worktree/.cleanup-'*; do
+    [ -d "$quarantine" ] || continue
+    mkdir -p "$quarantine/ignored-cache"
+    printf '%s\\n' 'late ignored content' > "$quarantine/ignored-cache/late.txt"
+  done
+fi
+printf '%s\\n' '[]'
+`)
+    await chmod(path.join(fakeBin, 'gh'), 0o755)
+    const result = run(entrypoint, ['--apply', '--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cleanup should preserve late ignored content')
+    const summary = JSON.parse(result.stdout)
+    const candidate = summary.results.find((item) => item.path === worktree)
+    if (candidate?.reason === 'worktree-process-check-unavailable') {
+      assert.equal(existsSync(worktree), true)
+      assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+      t.skip('host process-use inspection is unavailable before the late-content race can be exercised')
+      return
+    }
+    assert.equal(candidate?.action, 'skip', JSON.stringify(summary, null, 2))
+    assert.equal(candidate?.reason, 'ignored-files-present')
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.length, 4, JSON.stringify(calls))
+    assert.ok(calls.every((call) => !/--author/.test(call)), JSON.stringify(calls))
+    assert.equal(existsSync(path.join(worktree, 'ignored-cache', 'late.txt')), true)
+    assert.equal(existsSync(worktree), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).stdout.split(/\r?\n/).some((line) => line === `worktree ${worktree}`), true)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('restores a no-open-PR candidate when a fork PR appears during final revalidation', async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-late-fork-pr-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    const branchHead = head
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    const fakeGh = path.join(fakeBin, 'gh')
+    const openForkPr = JSON.stringify([noOpenPullRequestFixture(head, { headRepository: { nameWithOwner: 'contributor/repo' } })])
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(fakeGh, `#!/bin/sh
+count=0
+if [ -f '${ghLog}' ]; then
+  count=$(wc -l < '${ghLog}')
+fi
+count=$((count + 1))
+printf '%s\\n' "$*" >> '${ghLog}'
+if [ "$count" -eq 4 ]; then
+  printf '%s\\n' '${openForkPr}'
+else
+  printf '%s\\n' '[]'
+fi
+`)
+    await chmod(fakeGh, 0o755)
+
+    const result = run(entrypoint, ['--apply', '--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+    assert.ok(result.stdout, result.stderr || result.error || 'cleanup returned no JSON summary')
+    const summary = JSON.parse(result.stdout)
+    const candidate = summary.results.find((item) => item.path === worktree)
+    if (candidate?.reason === 'worktree-process-check-unavailable' || candidate?.reason === 'worktree-in-use') {
+      assert.equal(result.status, 0, result.stderr || JSON.stringify(summary, null, 2))
+      assert.equal(candidate.action, 'skip')
+      assert.equal(existsSync(worktree), true)
+      assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+      t.skip(`host process-use inspection stopped before final PR revalidation (${candidate.reason})`)
+      return
+    }
+
+    assert.equal(result.status, 1, JSON.stringify(summary, null, 2))
+    assert.equal(summary.errors, 1)
+    const calls = await ghCalls(ghLog)
+    assert.equal(calls.length, 4, JSON.stringify(calls))
+    assert.ok(calls.every((call) => {
+      return !/--author/.test(call) && /--head feature(?: |$)/.test(call)
+    }), JSON.stringify(calls))
+    assert.equal(candidate?.action, 'error', JSON.stringify(summary, null, 2))
+    assert.equal(candidate?.reason, 'merge-evidence-changed-before-remove')
+    assert.match(candidate?.detail || '', /open PR #17 now protects feature/)
+    assert.equal(existsSync(worktree), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).stdout.split(/\r?\n/).some((line) => {
+      return line === `worktree ${worktree}`
+    }), true)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('uses root only for repository discovery and includes outside registered worktrees in no-open-PR mode', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-discovery-root-'))
+  const externalWorktree = path.join(path.dirname(fixtureRoot), `${path.basename(fixtureRoot)}-repo-feature`)
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    git(repo, ['worktree', 'move', worktree, externalWorktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, path.join(fixtureRoot, 'gh.log'), [])
+    const options = { env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` } }
+
+    const help = run(entrypoint, ['--help'], options)
+    assert.equal(help.status, 0, help.stderr || help.stdout || help.error || 'process did not start')
+    assert.match(help.stdout, /--root and GIT_REPOSITORIES_ROOT only control repository discovery/)
+    assert.match(help.stdout, /--prune-no-open-pr-worktrees/)
+
+    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], options)
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.repositories_checked, 1)
+    assert.equal(summary.root, fixtureRoot)
+    const included = summary.results.find((item) => item.path === externalWorktree)
+    assert.equal(included?.action, 'would-delete', JSON.stringify(summary, null, 2))
+    assert.equal(included?.reason, 'no-open-pr')
+    assert.equal(included?.branch_will_be_preserved, true)
+    assert.equal(summary.results.some((item) => item.reason === 'outside-managed-worktree-root'), false)
+    assert.equal(existsSync(externalWorktree), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+  } finally {
+    await rm(externalWorktree, { recursive: true, force: true })
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('apply removes a no-open-PR worktree without deleting its branch when process checks permit it', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-worktrees-apply-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    await writeFile(path.join(worktree, '.gitignore'), 'node_modules/\n')
+    git(worktree, ['add', '.gitignore'])
+    git(worktree, ['commit', '-qm', 'ignore install-generated dependencies'])
+    const installedFile = path.join(worktree, 'node_modules', 'example-package', 'index.js')
+    await mkdir(path.dirname(installedFile), { recursive: true })
+    await writeFile(installedFile, 'module.exports = true\n')
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/origin/stale-no-open-pr', branchHead])
+    git(repo, ['branch', 'unattached-merged', 'main'])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, [])
+    const result = run(entrypoint, ['--apply', '--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    assert.equal(summary.no_open_pr_policy?.process_usage_check, 'required')
+    const candidate = summary.results.find((item) => item.path === worktree)
+    if (candidate?.action === 'deleted') {
+      assert.equal(candidate.reason, 'no-open-pr')
+      assert.equal(candidate.branch_deleted, false)
+      assert.equal(candidate.branch_preserved, true)
+      assert.equal(candidate.branch_delete_method, 'git-update-ref-transaction-cas-verify-preserve-local-branch')
+      assert.equal(candidate.process_usage_check, 'checked-unused')
+      assert.equal(candidate.ignored_files_removed?.before_quarantine, '1 ignored path')
+      assert.equal(existsSync(worktree), false)
+      assert.equal(existsSync(installedFile), false)
+      assert.equal(git(repo, ['worktree', 'list', '--porcelain']).stdout.split(/\r?\n/).some((line) => line === `worktree ${worktree}`), false)
+      const calls = await ghCalls(ghLog)
+      assert.ok(calls.length >= 2, JSON.stringify(calls))
+      assert.ok(calls.every((call) => !/--author/.test(call) && /--head feature(?: |$)/.test(call)), JSON.stringify(calls))
+    } else {
+      assert.equal(candidate?.action, 'skip')
+      assert.ok(['worktree-process-check-unavailable', 'worktree-in-use'].includes(candidate?.reason))
+      assert.equal(existsSync(worktree), true)
+    }
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/unattached-merged'])
+    git(repo, ['show-ref', '--verify', '--quiet', 'refs/remotes/origin/stale-no-open-pr'])
+    assert.equal(summary.results.some((item) => item.target === 'branch' || item.target === 'remote-tracking-ref'), false)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps locked and dirty worktrees in no-open-PR mode', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-locked-dirty-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const dirtyWorktree = path.join(repo, '.worktree', 'dirty')
+    git(repo, ['worktree', 'add', '-q', '-b', 'dirty', dirtyWorktree, 'main'])
+    await writeFile(path.join(dirtyWorktree, 'untracked.txt'), 'keep\n')
+    git(repo, ['worktree', 'lock', '--reason', 'operator hold', worktree])
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, path.join(fixtureRoot, 'gh.log'), [])
+    for (const args of [['--json'], ['--apply', '--json']]) {
+      const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', ...args], {
+        env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+      })
+
+      assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+      const summary = JSON.parse(result.stdout)
+      assert.equal(summary.results.find((item) => item.path === worktree)?.reason, 'locked')
+      assert.equal(summary.results.find((item) => item.path === dirtyWorktree)?.reason, 'dirty')
+      assert.equal(existsSync(worktree), true)
+      assert.equal(existsSync(path.join(dirtyWorktree, 'untracked.txt')), true)
+    }
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('leaves stale worktree registrations untouched in no-open-PR apply mode', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-stale-registration-'))
+  try {
+    const repo = await makeCommittedRepo(fixtureRoot)
+    const stale = await addPrunableWorktree(repo)
+    const result = run(entrypoint, ['--apply', '--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    const registration = summary.results.find((item) => item.path === stale)
+    assert.equal(registration?.action, 'skip')
+    assert.equal(registration?.reason, 'prunable')
+    assert.match(registration?.detail || '', /retained in no-open-PR mode/)
+    assert.equal(summary.pruned, 0)
+    const staleEntry = git(repo, ['worktree', 'list', '--porcelain']).stdout
+      .split(/\r?\n\r?\n/)
+      .find((entry) => entry.split(/\r?\n/).includes(`worktree ${stale}`))
+    assert.match(staleEntry || '', /prunable/)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('retains stale worktree registrations while processing other no-open-PR candidates', async (t) => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-no-open-pr-stale-with-candidate-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const stale = await addPrunableWorktree(repo)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await writeLoggingGh(fakeBin, path.join(fixtureRoot, 'gh.log'), [])
+    const branchHead = git(repo, ['rev-parse', 'refs/heads/feature']).stdout.trim()
+    const staleHead = git(repo, ['rev-parse', 'refs/heads/stale']).stdout.trim()
+    const result = run(entrypoint, ['--apply', '--repo', repo, '--root', fixtureRoot, '--prune-no-open-pr-worktrees', '--json'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot, PATH: `${fakeBin}:${process.env.PATH}` },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    const summary = JSON.parse(result.stdout)
+    const candidate = summary.results.find((item) => item.path === worktree)
+    const staleResult = summary.results.find((item) => item.path === stale)
+    assert.equal(summary.errors, 0, JSON.stringify(summary, null, 2))
+    assert.equal(staleResult?.action, 'skip')
+    assert.equal(staleResult?.reason, 'prunable')
+    assert.match(staleResult?.detail || '', /retained in no-open-PR mode/)
+    assert.equal(git(repo, ['worktree', 'list', '--porcelain']).stdout.split(/\r?\n/).some((line) => line === `worktree ${stale}`), true)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/stale']).stdout.trim(), staleHead)
+    assert.equal(git(repo, ['rev-parse', '--verify', 'refs/heads/feature']).stdout.trim(), branchHead)
+    if (candidate?.reason === 'worktree-process-check-unavailable') {
+      assert.equal(existsSync(worktree), true)
+      t.skip('host process-use inspection is unavailable before worktree removal can be exercised')
+      return
+    }
+    assert.equal(candidate?.action, 'deleted')
+    assert.equal(candidate.reason, 'no-open-pr')
+    assert.equal(candidate.branch_preserved, true)
+    assert.equal(existsSync(worktree), false)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('requires a single explicit repository and root and rejects cron for no-open-PR worktree cleanup', () => {
+  const missingRepo = run(entrypoint, ['--root', os.tmpdir(), '--prune-no-open-pr-worktrees', '--json'])
+  assert.equal(missingRepo.status, 2)
+  assert.match(missingRepo.stderr, /requires exactly one explicit --repo/)
+
+  const multipleRepos = run(entrypoint, ['--repo', path.join(os.tmpdir(), 'a'), '--repo', path.join(os.tmpdir(), 'b'), '--root', os.tmpdir(), '--prune-no-open-pr-worktrees', '--json'])
+  assert.equal(multipleRepos.status, 2)
+  assert.match(multipleRepos.stderr, /requires exactly one explicit --repo/)
+
+  const missingRoot = run(entrypoint, ['--repo', path.join(os.tmpdir(), 'not-a-repository'), '--prune-no-open-pr-worktrees', '--json'])
+  assert.equal(missingRoot.status, 2)
+  assert.match(missingRoot.stderr, /requires an explicit --root/)
+
+  const cron = run(entrypoint, ['--repo', path.join(os.tmpdir(), 'not-a-repository'), '--root', os.tmpdir(), '--prune-no-open-pr-worktrees', '--cron'])
+  assert.equal(cron.status, 2)
+  assert.match(cron.stderr, /--prune-no-open-pr-worktrees cannot be combined with --cron/)
+})
+
 test('removes a clean merged worktree and its local branch in apply mode', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-merged-'))
   try {

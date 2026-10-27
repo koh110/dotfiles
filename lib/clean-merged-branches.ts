@@ -12,7 +12,7 @@ import { classifyAggregatePatchFailure, aggregatePatchEquivalence as checkAggreg
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. --root and GIT_REPOSITORIES_ROOT only control repository discovery and do not restrict linked worktree paths. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, unlocked linked worktrees registered by Git for a discovered repository, regardless of filesystem path, with verified merge evidence or a same-repository closed-PR head match are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion. Process-use checks are skipped only when GitHub verifies a same-repository merged or closed PR with a matching head; this is reported explicitly because the worktree may still be in use. The default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree, or when its same-repository closed PR has the same head branch and its local head matches or precedes the PR head. A closed PR is not merge evidence; local cleanup requires its matching same-repository refs/pull/PR_NUMBER/head recovery ref to remain available, so another local ref is not required; an open PR protects its branch. Local branches not checked out in any worktree follow the same cleanup rules. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--prune-no-open-pr-worktrees] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. --root and GIT_REPOSITORIES_ROOT only control repository discovery and do not restrict linked worktree paths. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, unlocked linked worktrees registered by Git for a discovered repository, regardless of filesystem path, with verified merge evidence or a same-repository closed-PR head match are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion. Process-use checks are skipped only when GitHub verifies a same-repository merged or closed PR with a matching head; this is reported explicitly because the worktree may still be in use. The default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree, or when its same-repository closed PR has the same head branch and its local head matches or precedes the PR head. A closed PR is not merge evidence; local cleanup requires its matching same-repository refs/pull/PR_NUMBER/head recovery ref to remain available, so another local ref is not required; an open PR protects its branch. Local branches not checked out in any worktree follow the same cleanup rules. Remote branches are never deleted.\n\n--prune-no-open-pr-worktrees is an explicit opt-in that requires exactly one --repo and an explicit --root; --root still only controls repository discovery, so every Git-registered linked worktree of that repository is considered regardless of its path. It is not available with --cron. A clean, unlocked, non-primary worktree becomes a candidate even without merge evidence when GitHub reports no open PR from any author, including forks, for its branch; a failed, invalid, or truncated PR query fails closed and the open-PR check is repeated for all authors immediately before removal. Applying removes only the worktree: its local branch is preserved and verified unchanged by a ref transaction. Ignored node_modules paths are treated as install-generated and removed with the worktree; any other ignored content is retained and the worktree is skipped. Dry-run does not run process-use checks and reports process_usage_check=not-run-dry-run; apply requires them and skips worktrees that are in use or cannot be inspected. This mode does not prune stale worktree registrations, origin tracking refs, remote branches, or local branches without a worktree.\n`)
 }
 
 type RunOptions = {
@@ -45,7 +45,7 @@ function git(repo: string, args: string[], options: RunOptions = {}) {
   return run('git', ['-C', repo, ...args], options)
 }
 
-async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => Promise<string | null> | string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null, beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
+async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: string, defaultRef: string, expectedDefaultHead: string, verifyUnderLock: () => Promise<string | null> | string | null = () => null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), allowedWorktreePath: string | null = null, beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true }), preserveBranch = false) {
   const command = ['-C', repo, 'update-ref', '--stdin']
   let stdout = ''
   let stderr = ''
@@ -88,7 +88,8 @@ async function deleteBranchRefWithCas(repo: string, ref: string, expectedOid: st
       await finished
     }
   }
-  child.stdin.write(`start\nverify ${defaultRef} ${expectedDefaultHead}\ndelete ${ref} ${expectedOid}\nprepare\n`)
+  // branchを保持する場合も同じtransactionでrefをlockし、commitまで期待OIDから変わっていないことを検証する。
+  child.stdin.write(`start\nverify ${defaultRef} ${expectedDefaultHead}\n${preserveBranch ? 'verify' : 'delete'} ${ref} ${expectedOid}\nprepare\n`)
   const prepareDeadline = Date.now() + 30_000
   const hasAck = (name: string) => stdout.split(/\r?\n/).includes(`${name}: ok`)
   while (!closed && Date.now() < prepareDeadline && !hasAck('prepare')) {
@@ -390,6 +391,23 @@ function openPullRequestEvidenceError(repo: string, branchRef: string, evidence:
   return null
 }
 
+function noOpenPullRequestEvidenceError(repo: string, branchRef: string, expectedHead: string, evidence: any, checkOpenPullRequest = true): string | null {
+  const branch = evidence.head_ref
+  if (branchRef !== `refs/heads/${branch}`) return `${branchRef} no longer matches its no-open-PR branch evidence`
+  const branchHead = git(repo, ['rev-parse', '--verify', branchRef])
+  if (!branchHead.ok || branchHead.stdout.trim() !== expectedHead) {
+    return !branchHead.ok
+      ? commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], branchHead)
+      : `${branchRef} changed: ${branchHead.stdout.trim()} != ${expectedHead}`
+  }
+  if (!checkOpenPullRequest) return null
+  const current = noOpenPullRequestForBranch(repo, branch)
+  if (!current.ok) return `no-open-PR revalidation failed for ${branch}: ${current.error}`
+  if (current.repository !== evidence.repository) return `${branchRef} GitHub repository changed before removal`
+  if (current.openPull) return `open PR #${current.openPull.number} now protects ${branch}`
+  return null
+}
+
 async function cleanupEvidenceError(repo: string, branchRef: string, expectedHead: string, defaultRef: string, evidence: any, expectedDefaultHead: string = evidence.default_head, checkOpenPullRequest = true) {
   if (!isGitObjectId(expectedDefaultHead)) return `invalid expected default ref OID for ${defaultRef}: ${expectedDefaultHead || '<missing>'}`
   const defaultResult = git(repo, ['rev-parse', '--verify', defaultRef])
@@ -397,6 +415,7 @@ async function cleanupEvidenceError(repo: string, branchRef: string, expectedHea
   const actualDefaultHead = defaultResult.stdout.trim()
   if (actualDefaultHead !== expectedDefaultHead) return `default ref changed: ${actualDefaultHead || '<missing>'} != ${expectedDefaultHead}`
   if (evidence.method === 'closed-pr') return closedPullRequestEvidenceError(repo, branchRef, expectedHead, evidence)
+  if (evidence.method === 'no-open-pr') return noOpenPullRequestEvidenceError(repo, branchRef, expectedHead, evidence, checkOpenPullRequest)
   if (checkOpenPullRequest && evidence.method !== 'closed-pr' && evidence.repository && evidence.head_ref) {
     const openPullError = openPullRequestEvidenceError(repo, branchRef, evidence)
     if (openPullError) return openPullError
@@ -425,14 +444,18 @@ async function cleanupEvidenceError(repo: string, branchRef: string, expectedHea
 }
 
 function cleanupReason(evidence: any) {
-  return evidence.method === 'closed-pr' ? 'closed-pr' : 'merged'
+  return evidence.method === 'closed-pr' ? 'closed-pr' : evidence.method === 'no-open-pr' ? 'no-open-pr' : 'merged'
 }
 
 // merge確認済みまたはclosed PRで候補となったlocal branchを、PR state/headとref identityを再検証しながら削除する。
+// no-open-PR候補ではbranchを削除せず、同じref transaction内でverifyして保持する。
 // `git branch -d`はupstream基準のmergedness判定で拒否する場合があるため使わず、ref CAS transactionで削除する。
 // 同一repositoryのmerged/closed PR headはGitHubを復旧元とし、closed PRではrefs/pull/<number>/headの一致を削除直前に再確認する。
 async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], branchRef: string, expectedHead: string, defaultRef: string, expectedDefaultHead: string, evidence: any, allowedWorktreePath: string | null = null, beforeCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), beforeRefCommit: () => Promise<{ ok: boolean, reason?: string, error?: string }> = async () => ({ ok: true }), afterAbort: () => Promise<{ ok: boolean, error?: string }> = async () => ({ ok: true })) {
-  const branchDeleteMethod = evidence.method === 'ancestry'
+  const preserveBranch = evidence.method === 'no-open-pr'
+  const branchDeleteMethod = preserveBranch
+    ? 'git-update-ref-transaction-cas-verify-preserve-local-branch'
+    : evidence.method === 'ancestry'
     ? 'git-update-ref-transaction-cas-with-ancestry-evidence'
     : evidence.method === 'patch-equivalence'
       ? 'git-update-ref-transaction-cas-with-patch-equivalence-evidence'
@@ -462,12 +485,14 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
       } else {
         const branchDelete = await deleteBranchRefWithCas(repo, branchRef, expectedHead, defaultRef, expectedDefaultHead, async () => {
           return cleanupEvidenceError(repo, branchRef, expectedHead, defaultRef, evidence, expectedDefaultHead)
-        }, beforeCommit, allowedWorktreePath, beforeRefCommit, afterAbort)
+        }, beforeCommit, allowedWorktreePath, beforeRefCommit, afterAbort, preserveBranch)
         if (!branchDelete.ok) {
           let restoreDetail = ''
           if (branchDelete.committed) {
-            const restored = restoreBranchRef(repo, branchRef, expectedHead)
-            restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+            if (!preserveBranch) {
+              const restored = restoreBranchRef(repo, branchRef, expectedHead)
+              restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
+            }
           } else {
             const branchAfterFailedDelete = verifyRefAbsent(repo, branchRef)
             if (!branchAfterFailedDelete.ok || branchAfterFailedDelete.absent) {
@@ -477,6 +502,20 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
             if (!branchAfterFailedDelete.ok) restoreDetail = `${restoreDetail}; ref state after failed delete is indeterminate: ${branchAfterFailedDelete.error}`
           }
           outcome = { ok: false, reason: branchDelete.reason || 'branch-delete-failed', detail: `${branchDelete.error || commandDiagnostic('git', ['-C', repo, 'update-ref', '--stdin'], branchDelete)}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
+        } else if (preserveBranch) {
+          const branchAfterCommit = git(repo, ['rev-parse', '--verify', branchRef])
+          const listingAfterCommit = git(repo, ['worktree', 'list', '--porcelain', '-z'])
+          const branchUsedAfterCommit = listingAfterCommit.ok && parseWorktrees(listingAfterCommit.stdout).some((worktree) => worktree.branchRef === branchRef)
+          if (!branchAfterCommit.ok || branchAfterCommit.stdout.trim() !== expectedHead || !listingAfterCommit.ok || branchUsedAfterCommit) {
+            const issues = []
+            if (!branchAfterCommit.ok) issues.push(commandDiagnostic('git', ['-C', repo, 'rev-parse', '--verify', branchRef], branchAfterCommit))
+            else if (branchAfterCommit.stdout.trim() !== expectedHead) issues.push(`${branchRef} changed after ${branchDeleteMethod}: ${branchAfterCommit.stdout.trim()} != ${expectedHead}`)
+            if (!listingAfterCommit.ok) issues.push(commandDiagnostic('git', ['-C', repo, 'worktree', 'list', '--porcelain', '-z'], listingAfterCommit))
+            else if (branchUsedAfterCommit) issues.push(`${branchRef} became used by another worktree after ${branchDeleteMethod}`)
+            outcome = { ok: false, reason: 'branch-preservation-unverified', detail: issues.join('; '), branch_delete_method: branchDeleteMethod }
+          } else {
+            outcome = { ok: true, reason: 'branch-preserved', branch_delete_method: branchDeleteMethod }
+          }
         } else {
           const branchAfterDelete = verifyRefAbsent(repo, branchRef)
           const listingAfterBranchDelete = git(repo, ['worktree', 'list', '--porcelain', '-z'])
@@ -501,7 +540,7 @@ async function deleteLocalBranchSafely(repo: string, worktreeRecords: any[], bra
     const released = await headLocks.release()
     if (!released.ok) {
       if (outcome.ok) {
-        const restored = restoreBranchRef(repo, branchRef, expectedHead)
+        const restored = preserveBranch ? { ok: true, error: undefined } : restoreBranchRef(repo, branchRef, expectedHead)
         const restoreDetail = restored.ok ? '' : `; branch restore failed: ${restored.error}`
         outcome = { ok: false, reason: 'worktree-head-lock-release-failed', detail: `${released.error}${restoreDetail}`, branch_delete_method: branchDeleteMethod }
       } else {
@@ -942,7 +981,7 @@ function parseWorktrees(output: string) {
 
 // The prepared ref transaction protects refs, not the pathname of a worktree registration.
 // Re-read registration, filesystem identity, HEAD, and branch immediately before removal.
-async function inspectWorktreeIdentity(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, expectedLockReason: string | null = null) {
+async function inspectWorktreeIdentity(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, expectedLockReason: string | null = null, allowInstallGeneratedIgnored = false) {
   const resolvedPath = path.resolve(worktreePath)
   const listingArgs = ['worktree', 'list', '--porcelain', '-z']
   const listing = git(repo, listingArgs)
@@ -975,9 +1014,14 @@ async function inspectWorktreeIdentity(repo: string, worktreePath: string, expec
   if (!status.ok) issues.push(commandDiagnostic('git', ['-C', worktreePath, ...statusArgs], status))
   else if (status.stdout.length > 0) issues.push('worktree became dirty before removal')
   const ignored = ignoredFiles(worktreePath)
+  let unexpectedIgnoredPresent = false
   if (!ignored.ok) issues.push(commandDiagnostic('git', ['-C', worktreePath, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], ignored))
-  else if (ignored.stdout.length > 0) issues.push('ignored files appeared before removal')
-  return issues.length === 0 ? { ok: true } : { ok: false, error: issues.join('; ') }
+  else if ((allowInstallGeneratedIgnored ? ignoredFilesOutsideInstallGeneratedDirectories(ignored) : ignored).stdout.length > 0) {
+    unexpectedIgnoredPresent = true
+    issues.push('ignored files appeared before removal')
+  }
+  if (issues.length === 0) return { ok: true }
+  return { ok: false, reason: issues.length === 1 && unexpectedIgnoredPresent ? 'ignored-files-present' : undefined, error: issues.join('; ') }
 }
 
 // Git's registration lock is the enforceable fence between the final identity
@@ -985,7 +1029,7 @@ async function inspectWorktreeIdentity(repo: string, worktreePath: string, expec
 // replace the registration while this lock is held. A single `--force` also
 // respects it; the cleanup's double-force is used only after all dirty-state
 // checks have passed because Git otherwise refuses to remove a locked tree.
-async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, existingLockReason: string | null = null) {
+async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, existingLockReason: string | null = null, allowInstallGeneratedIgnored = false) {
   let acquiredHere = false
   let lockArgs = null
   if (existingLockReason === null) {
@@ -994,12 +1038,12 @@ async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: st
     if (!locked.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...lockArgs], locked) }
     acquiredHere = true
   }
-  const identity = await inspectWorktreeIdentity(repo, worktreePath, expectedHead, expectedBranchRef, expectedRegistration, existingLockReason)
+  const identity = await inspectWorktreeIdentity(repo, worktreePath, expectedHead, expectedBranchRef, expectedRegistration, existingLockReason, allowInstallGeneratedIgnored)
   if (identity.ok) return { ok: true, registrationLocked: true }
   const unlockArgs = ['worktree', 'unlock', worktreePath]
   const unlocked = acquiredHere ? git(repo, unlockArgs) : { ok: true }
   const unlockError = unlocked.ok ? '' : `; ${commandDiagnostic('git', ['-C', repo, ...unlockArgs], unlocked)}`
-  return { ok: false, error: `${identity.error}${unlockError}` }
+  return { ok: false, reason: identity.reason, error: `${identity.error}${unlockError}` }
 }
 
 function pruneWorktreeRegistrations(repo, apply) {
@@ -1426,6 +1470,12 @@ function ignoredFiles(repo) {
   return git(repo, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'])
 }
 
+// no-open-PR modeではnode_modules配下だけをinstall-generatedとみなし、worktreeと一緒に削除してよい内容とする。
+function ignoredFilesOutsideInstallGeneratedDirectories(result: { ok: boolean, stdout: string }) {
+  const paths = result.stdout.split('\0').filter(Boolean).filter((ignoredPath) => !ignoredPath.split('/').includes('node_modules'))
+  return { ...result, stdout: paths.length === 0 ? '' : `${paths.join('\0')}\0` }
+}
+
 function ignoredFilesDetail(result) {
   const count = result.stdout.split('\0').filter(Boolean).length
   return `${count} ignored path${count === 1 ? '' : 's'}`
@@ -1585,6 +1635,7 @@ type PullRequest = {
 }
 
 type PullRequestQuery = { ok: true, pulls: PullRequest[], truncated: boolean } | { ok: false, code: string, error: string }
+type NoOpenPullRequestResult = { ok: true, repository: string, openPull: PullRequest | null } | { ok: false, code: string, error: string, repository?: string }
 type PullListValidation = { ok: true, pulls: PullRequest[] } | { ok: false, error: string }
 type PullRequestContext = { ok: true, target: string, oidLength: number } | { ok: false, code: string, error: string, repository?: string }
 type PullRequestEvidenceResult = {
@@ -1604,6 +1655,7 @@ type CleanupEvidence =
   | { method: 'patch-equivalence', default_ref: string, default_head: string, commit_count: number, repository?: string | undefined, head_ref: string }
   | { method: 'aggregate-patch-equivalence', default_ref: string, default_head: string, merge_base: string, commit_count: number, changed_path_count: number, repository?: string | undefined, head_ref: string }
   | { method: 'closed-pr', pr: string, number: number, state: 'CLOSED', repository: string, head_repository: string, head_ref: string, pr_head: string, branch_head: string, head_relation: 'exact' | 'ancestor', base_ref: string, default_ref: string, default_head: string }
+  | { method: 'no-open-pr', repository: string, head_ref: string, pr_query_scope: 'all-authors', default_ref: string, default_head: string }
 type CleanupEvidenceResolution =
   | { ok: false, code: string, error: string, repository?: string | undefined, pr_error?: { code: string; detail: string } }
   | { ok: true, evidence: CleanupEvidence | null, skip_reason?: string, detail?: string }
@@ -1667,9 +1719,12 @@ function validatePullList(pulls: unknown, oidLength: number): PullListValidation
   return { ok: true, pulls: validatedPulls }
 }
 
-function queryPullRequests(target: string, oidLength: number, limit: number, headBranch: string | null = null): PullRequestQuery {
+function queryPullRequests(target: string, oidLength: number, limit: number, headBranch: string | null = null, allAuthorsOpenOnly = false): PullRequestQuery {
   // 他者のPR由来のブランチやworktreeは再取得可能なため、認証中ユーザー自身のPRだけを証拠・保護対象にする。
-  const args = ['pr', 'list', '--repo', target, '--author', '@me', '--state', 'all', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
+  // no-open-PR modeはmerge evidenceなしで削除するため、fork由来を含む全authorのopen PRを保護対象にする。
+  const args = allAuthorsOpenOnly
+    ? ['pr', 'list', '--repo', target, '--state', 'open', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
+    : ['pr', 'list', '--repo', target, '--author', '@me', '--state', 'all', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
   if (headBranch) args.push('--head', headBranch)
   const response = run('gh', args, { timeout: 120_000 })
   if (!response.ok) return { ok: false, code: 'github-query-failed', error: (response.stderr || response.error || '').trim() }
@@ -1683,6 +1738,22 @@ function queryPullRequests(target: string, oidLength: number, limit: number, hea
   if (!validatedPulls.ok) return { ok: false, code: 'github-invalid-response', error: validatedPulls.error }
   const pulls = validatedPulls.pulls
   return { ok: true, pulls, truncated: pulls.length >= limit }
+}
+
+// branch名が一致するopen PRはauthorやhead repositoryを問わず保護する。照会失敗・不正応答・上限到達はfail closedにする。
+function noOpenPullRequestForBranch(repo: string, branch: string): NoOpenPullRequestResult {
+  const remote = git(repo, ['config', '--get', 'remote.origin.url'])
+  if (!remote.ok) return { ok: false, code: 'missing-origin', error: commandDiagnostic('git', ['-C', repo, 'config', '--get', 'remote.origin.url'], remote) }
+  const target = ownerRepo(remote.stdout)
+  if (!target) return { ok: false, code: 'non-github-origin', error: remote.stdout.trim() }
+  const objectFormat = gitObjectIdLength(repo)
+  if (!objectFormat.ok) return { ok: false, code: objectFormat.code, error: objectFormat.error, repository: target }
+  const query = queryPullRequests(target, objectFormat.length, PULL_REQUEST_BRANCH_LIMIT, branch, true)
+  if (!query.ok) return { ok: false, code: query.code, error: query.error, repository: target }
+  const openPull = query.pulls.find((pull) => pull.state === 'OPEN' && pull.headRefName === branch) || null
+  if (openPull) return { ok: true, repository: target, openPull }
+  if (query.truncated) return { ok: false, code: 'github-query-truncated', error: `gh pr list returned at least ${PULL_REQUEST_BRANCH_LIMIT} open PRs for head branch ${branch}`, repository: target }
+  return { ok: true, repository: target, openPull: null }
 }
 
 // closed PRは同一repository内の同名head branchに限って候補とし、local HEADがPR headと一致するか、その祖先であることを要求する。
@@ -1984,15 +2055,15 @@ async function resolveCleanupEvidence(
   return { ok: true, evidence: null } as const satisfies CleanupEvidenceResolution
 }
 
-async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null) {
+async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null, pruneNoOpenPrWorktrees = false) {
   const realRepo = await fs.realpath(repo)
-  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
+  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, pruneNoOpenPrWorktrees)
   const lock = await acquireCleanupLock(realRepo)
   if (!lock.ok) return [{ repo: realRepo, action: 'error', reason: lock.code, detail: lock.error }]
   let results = []
   let inspectionError = null
   try {
-    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
+    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, pruneNoOpenPrWorktrees)
   } catch (error) {
     inspectionError = error
   }
@@ -2005,7 +2076,7 @@ async function inspectRepository(repo: string, apply: boolean, explicitDefaultBr
   return results
 }
 
-async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, explicitDefaultBranch: string | null) {
+async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, explicitDefaultBranch: string | null, pruneNoOpenPrWorktrees = false) {
   const results: any[] = []
   // 探索rootはrepositoryの発見にだけ使い、cleanup候補はGit登録済みworktreeから取得する。
   const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo) : { ok: true, fences: new Map(), release: async () => ({ ok: true }) }
@@ -2080,7 +2151,8 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     }
   }
   const initialPrunable = candidateWorktrees.filter((item) => item.prunable !== undefined)
-  const originPrune = pruneOriginTrackingRefs(realRepo, apply)
+  // no-open-PR modeはworktree削除だけを対象とし、origin tracking refとstale registrationはpruneしない。
+  const originPrune = pruneNoOpenPrWorktrees ? { results: [] } : pruneOriginTrackingRefs(realRepo, apply)
   results.push(...originPrune.results)
   let registrationFenceFailure = false
   try {
@@ -2088,9 +2160,12 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
 
   // Prune stale registrations before checking repository state or classifying candidates.
   // Dry-run keeps the repository unchanged and reports what apply would prune.
-  const prune = pruneWorktreeRegistrations(realRepo, apply)
+  const prune: { ok: boolean, error?: string } = pruneNoOpenPrWorktrees ? { ok: true } : pruneWorktreeRegistrations(realRepo, apply)
   if (!prune.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-prune-failed', detail: prune.error }]
-  if (apply) {
+  if (pruneNoOpenPrWorktrees) {
+    results.push(...initialPrunable.map((item) => worktreeRegistrationResult(realRepo, item, 'skip', `${item.prunable || 'stale registration'}; stale registration retained in no-open-PR mode`)))
+    candidateWorktrees = candidateWorktrees.filter((item) => !plannedPrunablePaths.has(path.resolve(item.path)))
+  } else if (apply) {
     const postPruneListing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
     if (!postPruneListing.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-list-after-prune-failed', detail: postPruneListing.stderr.trim() }]
     const postPruneWorktrees = parseWorktrees(postPruneListing.stdout)
@@ -2113,7 +2188,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
   if (isEmptyRepository(realRepo)) {
     return [...results, { repo: realRepo, action: 'skip', reason: 'empty-repository' }]
   }
-  if (candidateWorktrees.length === 0 && !hasUnattachedLocalBranches(realRepo, worktrees)) return results
+  if (candidateWorktrees.length === 0 && (pruneNoOpenPrWorktrees || !hasUnattachedLocalBranches(realRepo, worktrees))) return results
   // With no worktree candidates only unattached branches remain. A repository whose default
   // branch cannot be established (no origin, stale or dirty default, ...) keeps its branches
   // without reporting an error, matching how unmerged unattached branches are skipped.
@@ -2148,7 +2223,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     if (candidate === realRepo) continue
     const base = { repo: realRepo, path: candidate, branch: item.branchRef?.replace(/^refs\/heads\//, '') || null, head: item.head || null }
     if (item.prunable !== undefined) {
-      if (!apply && plannedPrunablePaths.has(candidate)) continue
+      if ((pruneNoOpenPrWorktrees || !apply) && plannedPrunablePaths.has(candidate)) continue
       results.push({ ...base, action: 'error', reason: 'worktree-prune-unresolved', detail: item.prunable || 'prunable registration remains' })
       continue
     }
@@ -2187,38 +2262,63 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
     const branchName = base.branch || ''
-    const pullEvidence = pullRequestEvidence(branchName, item.head || '')
-    const prGuard = openPullRequestGuard(branchName, pullEvidence)
-    if (!prGuard.ok) {
-      results.push({ ...base, action: 'error', reason: prGuard.code, detail: prGuard.error, repository: prGuard.repository })
-      continue
-    }
-    if (prGuard.skip_reason) {
-      results.push({ ...base, action: 'skip', reason: prGuard.skip_reason, detail: prGuard.detail })
-      continue
-    }
-    // Same-repository closed/merged PR head is the declared recovery source; keep every other safety check, but do not gate on process use.
-    let skipProcessUseCheck = skipProcessUsageCheckForClosedOrMergedPullRequest(pullEvidence)
-    let processUsageCheckResult = skipProcessUseCheck ? 'skipped-verified-closed-or-merged-pr' : 'checked-unused'
-    const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
-    let evidence: CleanupEvidence | null = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: branchName } : null
-    if (!evidence) {
-      const resolved = await resolveCleanupEvidence(realRepo, branchName, item.head || '', defaultInfo.ref, defaultHead, pullRequestEvidence)
-      if (!resolved.ok) {
-        results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: ('pr_error' in resolved ? resolved.pr_error : undefined) })
+    let pullEvidence: PullRequestEvidenceResult | null = null
+    let skipProcessUseCheck = false
+    let processUsageCheckResult = 'checked-unused'
+    let evidence: CleanupEvidence | null = null
+    if (pruneNoOpenPrWorktrees) {
+      // merge evidenceの代わりに、全authorのopen PRが存在しないことを候補条件にする。
+      const noOpenPr = noOpenPullRequestForBranch(realRepo, branchName)
+      if (!noOpenPr.ok) {
+        results.push({ ...base, action: 'error', reason: noOpenPr.code, detail: noOpenPr.error, repository: noOpenPr.repository })
         continue
       }
-      if (resolved.skip_reason) {
-        results.push({ ...base, action: 'skip', reason: resolved.skip_reason, detail: resolved.detail })
+      if (noOpenPr.openPull) {
+        results.push({ ...base, action: 'skip', reason: 'open-pull-request', detail: `open PR #${noOpenPr.openPull.number} protects ${branchName}`, repository: noOpenPr.repository })
         continue
       }
-      evidence = resolved.evidence
+      const unexpectedIgnoredBeforeQuarantine = ignoredFilesOutsideInstallGeneratedDirectories(ignoredBeforeQuarantine)
+      if (unexpectedIgnoredBeforeQuarantine.stdout.length > 0) {
+        results.push({ ...base, action: 'skip', reason: 'ignored-files-present', detail: `ignored content other than node_modules is retained in no-open-PR mode (${ignoredFilesDetail(unexpectedIgnoredBeforeQuarantine)})` })
+        continue
+      }
+      evidence = { method: 'no-open-pr', repository: noOpenPr.repository, head_ref: branchName, pr_query_scope: 'all-authors', default_ref: defaultInfo.ref, default_head: defaultHead }
+      processUsageCheckResult = apply ? 'checked-unused' : 'not-run-dry-run'
+    } else {
+      pullEvidence = pullRequestEvidence(branchName, item.head || '')
+      const prGuard = openPullRequestGuard(branchName, pullEvidence)
+      if (!prGuard.ok) {
+        results.push({ ...base, action: 'error', reason: prGuard.code, detail: prGuard.error, repository: prGuard.repository })
+        continue
+      }
+      if (prGuard.skip_reason) {
+        results.push({ ...base, action: 'skip', reason: prGuard.skip_reason, detail: prGuard.detail })
+        continue
+      }
+      // Same-repository closed/merged PR head is the declared recovery source; keep every other safety check, but do not gate on process use.
+      skipProcessUseCheck = skipProcessUsageCheckForClosedOrMergedPullRequest(pullEvidence)
+      processUsageCheckResult = skipProcessUseCheck ? 'skipped-verified-closed-or-merged-pr' : 'checked-unused'
+      const ancestry = git(realRepo, ['merge-base', '--is-ancestor', item.head || '', defaultInfo.ref]).ok
+      evidence = ancestry ? { method: 'ancestry', default_ref: defaultInfo.ref, default_head: defaultHead, repository: prGuard.repository, head_ref: branchName } : null
+      if (!evidence) {
+        const resolved = await resolveCleanupEvidence(realRepo, branchName, item.head || '', defaultInfo.ref, defaultHead, pullRequestEvidence)
+        if (!resolved.ok) {
+          results.push({ ...base, action: 'error', reason: resolved.code, detail: resolved.error, repository: resolved.repository, pr_error: ('pr_error' in resolved ? resolved.pr_error : undefined) })
+          continue
+        }
+        if (resolved.skip_reason) {
+          results.push({ ...base, action: 'skip', reason: resolved.skip_reason, detail: resolved.detail })
+          continue
+        }
+        evidence = resolved.evidence
+      }
     }
     if (!evidence) {
       results.push({ ...base, action: 'skip', reason: 'merge-evidence-not-found' })
       continue
     }
-    if (!skipProcessUseCheck) {
+    // no-open-PR modeのdry-runではprocess-use検査を行わず、その事実をprocess_usage_checkで報告する。applyでは必須。
+    if (!skipProcessUseCheck && (apply || !pruneNoOpenPrWorktrees)) {
       const processUsage = await processUsesWorktree(realCandidate)
       if (!processUsage.ok) {
         results.push({ ...base, action: 'skip', reason: 'worktree-process-check-unavailable', detail: processUsage.error, next_action: processNextAction('worktree-process-check-unavailable') })
@@ -2293,7 +2393,14 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       }
     }
     if (!apply) {
-      results.push({ ...base, action: 'would-delete', reason: cleanupReason(evidence), evidence, process_usage_check: processUsageCheckResult, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined })
+      const noOpenPrPlan = evidence.method === 'no-open-pr'
+        ? {
+            branch_will_be_deleted: false,
+            branch_will_be_preserved: true,
+            ignored_files_will_be_removed: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined,
+          }
+        : {}
+      results.push({ ...base, action: 'would-delete', reason: cleanupReason(evidence), evidence, process_usage_check: processUsageCheckResult, compose, ignored_files: ignoredBeforeQuarantine.stdout.length > 0 ? ignoredFilesDetail(ignoredBeforeQuarantine) : undefined, ...noOpenPrPlan })
       continue
     }
     const quarantineParent = path.dirname(realCandidate)
@@ -2358,7 +2465,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: registrationAfterQuarantineError ? 'worktree-registration-changed-after-quarantine' : 'worktree-head-or-branch-changed-after-quarantine', detail: restored.ok ? undefined : `restore failed: ${restored.stderr.trim()}`, evidence })
       continue
     }
-    if (skipProcessUseCheck && processUsageSkipEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, defaultHead, pullEvidence)) {
+    if (skipProcessUseCheck && (!pullEvidence || processUsageSkipEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, defaultHead, pullEvidence))) {
       skipProcessUseCheck = false
       processUsageCheckResult = 'checked-unused'
     }
@@ -2446,7 +2553,20 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       results.push({ ...base, action: 'error', reason: 'merge-evidence-changed-after-quarantine', detail: `${mergeEvidenceAfterQuarantineError}${restored.ok ? '' : `; restore failed: ${restored.stderr.trim()}`}`, evidence })
       continue
     }
-    if (ignoredFilesPresent) {
+    // no-open-PR modeではnode_modules以外のignored contentを削除せず、quarantineを戻して候補をskipする。
+    if (evidence.method === 'no-open-pr' && ignoredFilesOutsideInstallGeneratedDirectories(ignoredAfterQuarantine).stdout.length > 0) {
+      const restored = await restoreQuarantine()
+      if (!restored.ok) {
+        initialFence.retain = true
+        registrationFenceFailure = true
+        results.push({ ...base, action: 'error', reason: 'quarantine-restore-failed', detail: `ignored content other than node_modules appeared during cleanup and was retained, but the worktree could not be restored: ${restored.stderr.trim()}`, evidence })
+      } else {
+        results.push({ ...base, action: 'skip', reason: 'ignored-files-present', detail: 'ignored content other than node_modules appeared during cleanup and was retained', evidence })
+      }
+      continue
+    }
+    // no-open-PR modeで許容したnode_modulesはgit cleanせず、最終検査後のworktree removeで一緒に削除する。
+    if (ignoredFilesPresent && evidence.method !== 'no-open-pr') {
       if (!skipProcessUseCheck) {
         const processUsageBeforeClean = await processUsesWorktree(quarantine)
         if (!processUsageBeforeClean.ok || processUsageBeforeClean.used) {
@@ -2542,8 +2662,9 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       }
     }
     const quarantinePath = path.resolve(quarantine)
+    // no-open-PR modeではpruneしないstale registrationのpathが存在しないため、HEAD lock対象から外す。
     const headLockRecords = parseWorktrees(listingAfterQuarantine.stdout)
-      .filter((worktree) => path.resolve(worktree.path) !== quarantinePath)
+      .filter((worktree) => path.resolve(worktree.path) !== quarantinePath && (!pruneNoOpenPrWorktrees || worktree.prunable === undefined))
     let contentLocks: Awaited<ReturnType<typeof acquireWorktreeLocks>> | null = null
     const releaseContentLocks = async (consumed = false) => {
       if (!contentLocks || !('release' in contentLocks) || typeof contentLocks.release !== 'function') return { ok: true }
@@ -2555,14 +2676,14 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       const acquiredLocks = await acquireWorktreeLocks([{ path: quarantine }], ['HEAD', 'index'])
       if (!acquiredLocks.ok) return { ok: false, reason: 'worktree-content-lock-failed', error: acquiredLocks.error }
       contentLocks = acquiredLocks
-      const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
+      const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON, evidence.method === 'no-open-pr')
       if (!identity.ok) {
         const released = await releaseContentLocks()
         if (!released.ok) {
           initialFence.retain = true
           registrationFenceFailure = true
         }
-        return { ok: false, reason: 'worktree-identity-changed-before-remove', error: `${identity.error}${released.ok ? '' : `; content lock release failed: ${released.error}`}` }
+        return { ok: false, reason: (evidence.method === 'no-open-pr' && identity.reason) || 'worktree-identity-changed-before-remove', error: `${identity.error}${released.ok ? '' : `; content lock release failed: ${released.error}`}` }
       }
       if (!skipProcessUseCheck) {
         const processUsageBeforeRemove = await processUsesWorktree(quarantine)
@@ -2608,7 +2729,9 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       }
       let finalProcessSkipError: string | null = null
       if (skipProcessUseCheck) {
-        finalProcessSkipError = processUsageSkipEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, defaultHead, pullEvidence)
+        finalProcessSkipError = pullEvidence
+          ? processUsageSkipEvidenceError(realRepo, item.branchRef || '', item.head || '', defaultInfo.ref, defaultHead, pullEvidence)
+          : `${item.branchRef || '<missing>'}@${item.head || '<missing>'} has no closed/merged PR evidence snapshot`
         if (finalProcessSkipError) {
           skipProcessUseCheck = false
           processUsageCheckResult = 'checked-unused'
@@ -2637,6 +2760,17 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
             error: latestEvidenceError,
           }
         }
+      }
+      if (evidence.method === 'no-open-pr') {
+        // `worktree remove -f -f`はignored contentも消すため、node_modules以外が直前に現れていないか再検査する。
+        const finalStatusArgs = ['-c', 'status.showUntrackedFiles=all', 'status', '--porcelain=v1', '-z', '--untracked-files=all']
+        const finalStatus = git(quarantine, finalStatusArgs)
+        if (!finalStatus.ok) return { ok: false, reason: 'late-worktree-content-check-failed', error: commandDiagnostic('git', ['-C', quarantine, ...finalStatusArgs], finalStatus) }
+        if (finalStatus.stdout.length > 0) return { ok: false, reason: 'worktree-became-dirty-before-remove', error: 'tracked or untracked content appeared before removal and was retained' }
+        const finalIgnored = ignoredFiles(quarantine)
+        if (!finalIgnored.ok) return { ok: false, reason: 'late-ignored-content-check-failed', error: commandDiagnostic('git', ['-C', quarantine, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--directory'], finalIgnored) }
+        const unexpectedFinalIgnored = ignoredFilesOutsideInstallGeneratedDirectories(finalIgnored)
+        if (unexpectedFinalIgnored.stdout.length > 0) return { ok: false, reason: 'ignored-files-present', error: `ignored content other than node_modules appeared before removal and was retained: ${ignoredFilesDetail(unexpectedFinalIgnored)}` }
       }
       // The final authoritative PR/recovery check above is deliberately adjacent to this irreversible removal.
       const removeArgs = ['worktree', 'remove', '-f', '-f', quarantine]
@@ -2702,6 +2836,17 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         }
         continue
       }
+      if (branchSafety.reason === 'ignored-files-present') {
+        const restored = await restoreQuarantine()
+        if (!restored.ok) {
+          initialFence.retain = true
+          registrationFenceFailure = true
+          results.push({ ...base, action: 'error', reason: 'quarantine-restore-failed', detail: `${branchSafety.detail}; quarantine restore failed: ${restored.stderr.trim()}`, evidence, branch_delete_method: branchSafety.branch_delete_method })
+        } else {
+          results.push({ ...base, action: 'skip', reason: 'ignored-files-present', detail: branchSafety.detail, evidence, branch_delete_method: branchSafety.branch_delete_method })
+        }
+        continue
+      }
       if (branchSafety.reason === 'worktree-remove-failed') {
         initialFence.retain = true
         registrationFenceFailure = true
@@ -2719,9 +2864,13 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       }
       continue
     }
-    results.push({ ...base, action: 'deleted', reason: cleanupReason(evidence), evidence, process_usage_check: processUsageCheckResult, branch_deleted: true, detail: branchSafety.detail, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
+    const branchOutcome = evidence.method === 'no-open-pr'
+      ? { branch_deleted: false, branch_preserved: branchSafety.reason === 'branch-preserved' }
+      : { branch_deleted: true }
+    results.push({ ...base, action: 'deleted', reason: cleanupReason(evidence), evidence, process_usage_check: processUsageCheckResult, ...branchOutcome, detail: branchSafety.detail, branch_delete_method: branchSafety.branch_delete_method, ignored_files_removed: ignoredFilesRemoved })
   }
-  if (registrationFenceFailure) return results
+  // no-open-PR modeはworktreeのないlocal branchを対象にしない。
+  if (registrationFenceFailure || pruneNoOpenPrWorktrees) return results
   const worktreeBranchRefs = new Set(worktrees.map((item) => item.branchRef).filter(Boolean))
   results.push(...await cleanupUnattachedMergedBranches(realRepo, apply, explicitDefaultBranch, defaultInfo, defaultHead, worktreeBranchRefs, pullRequestEvidence, initialBranchHeads))
   return results
@@ -2926,7 +3075,7 @@ function renderCron(summary) {
 }
 
 async function main() {
-  const { values } = parseArgs({
+  const parsed = parseArgs({
     options: {
       root: { type: 'string' },
       repo: { type: 'string', multiple: true },
@@ -2934,11 +3083,17 @@ async function main() {
       apply: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
       cron: { type: 'boolean', default: false },
+      'prune-no-open-pr-worktrees': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: false,
     strict: true,
+    tokens: true,
   })
+  const { values } = parsed
+  const rootOptionCount = parsed.tokens.filter((token) => {
+    return token.kind === 'option' && token.name === 'root'
+  }).length
   if (values.help) return usage()
   const explicitRepos = (values.repo || []).map((repo) => path.resolve(repo))
   if (!values.root && explicitRepos.length === 0 && !config.configuredRoot) throw new Error('GIT_REPOSITORIES_ROOT is required when HOME is unset')
@@ -2946,14 +3101,30 @@ async function main() {
   const apply = values.apply
   const json = values.json
   const cron = values.cron
+  const pruneNoOpenPrWorktrees = values['prune-no-open-pr-worktrees']
   const explicitDefaultBranch = values['default-branch'] || null
   if (json && cron) throw new Error('--json and --cron are mutually exclusive')
+  if (pruneNoOpenPrWorktrees && cron) throw new Error('--prune-no-open-pr-worktrees cannot be combined with --cron')
+  if (pruneNoOpenPrWorktrees && explicitRepos.length !== 1) throw new Error('--prune-no-open-pr-worktrees requires exactly one explicit --repo')
+  if (pruneNoOpenPrWorktrees && !values.root) throw new Error('--prune-no-open-pr-worktrees requires an explicit --root (used only for repository discovery)')
+  if (pruneNoOpenPrWorktrees && rootOptionCount !== 1) throw new Error('--prune-no-open-pr-worktrees requires exactly one explicit --root')
 
   const repos = await discoverRepos(root, explicitRepos)
   const results: Array<{ action: string; reason?: string; repo?: string; path?: string; severity?: string; [key: string]: unknown }> = []
-  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch))
+  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch, pruneNoOpenPrWorktrees))
   const summary = {
     mode: apply ? 'apply' : 'dry-run',
+    ...(pruneNoOpenPrWorktrees
+      ? {
+          prune_no_open_pr_worktrees: true,
+          no_open_pr_policy: {
+            local_branches: 'preserved',
+            process_usage_check: apply ? 'required' : 'not-run-dry-run',
+            ignored_content: 'ignored node_modules paths are removed with the worktree; other ignored content is retained and the worktree is skipped',
+            open_pr_query: 'all authors, including forks; query failure, invalid response, or limit reached fails closed',
+          },
+        }
+      : {}),
     root,
     repositories_checked: repos.length,
     candidates: results.length,
@@ -2974,6 +3145,9 @@ async function main() {
   else if (cron) process.stdout.write(renderCron(summary))
   else {
     process.stdout.write(`Repository cleanup (${summary.mode}): ${summary.repositories_checked} repos, ${summary.deleted} worktrees deleted, ${summary.origin_tracking_refs_pruned} origin tracking refs pruned, ${summary.would_delete} would delete, ${summary.would_prune_origin_tracking_refs} origin refs would prune, ${summary.errors} errors\n`)
+    if (pruneNoOpenPrWorktrees) {
+      process.stdout.write('No-open-PR safety policy: local branches are preserved; process-use checks are not run during dry-run and are required before apply removal; ignored node_modules paths are removed, while other ignored content is retained and causes a skip.\n')
+    }
     for (const item of results) process.stdout.write(`${item.action.toUpperCase()} ${resultTarget(item)}: ${item.reason}\n`)
   }
   process.exitCode = summary.errors > 0 ? 1 : 0
