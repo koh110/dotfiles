@@ -12,7 +12,7 @@ import { classifyAggregatePatchFailure, aggregatePatchEquivalence as checkAggreg
 const config = loadCleanMergedBranchesConfig()
 
 function usage() {
-  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, unlocked linked worktrees under GIT_REPOSITORIES_ROOT with verified merge evidence or a same-repository closed-PR head match are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion. Process-use checks are skipped only when GitHub verifies a same-repository merged or closed PR with a matching head; this is reported explicitly because the worktree may still be in use. The default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree, or when its same-repository closed PR has the same head branch and its local head matches or precedes the PR head. A closed PR is not merge evidence; local cleanup requires its matching same-repository refs/pull/PR_NUMBER/head recovery ref to remain available, so another local ref is not required; an open PR protects its branch. Local branches not checked out in any worktree follow the same cleanup rules. Remote branches are never deleted.\n`)
+  process.stdout.write(`Usage: clean-merged-branches [--root DIR] [--repo DIR ...] [--default-branch NAME] [--apply] [--json|--cron]\n\nDefault is dry-run. GIT_REPOSITORIES_ROOT defaults to $HOME/dev. --root and GIT_REPOSITORIES_ROOT only control repository discovery and do not restrict linked worktree paths. Stale worktree registrations and stale origin tracking refs covered by origin's fetch refspec are pruned first; remote branches and refs outside that refspec are retained. Only clean, unlocked linked worktrees registered by Git for a discovered repository, regardless of filesystem path, with verified merge evidence or a same-repository closed-PR head match are eligible for removal; the repository's primary checkout is never removed. Candidate worktrees are disposable and ignored content is removed before worktree deletion. Process-use checks are skipped only when GitHub verifies a same-repository merged or closed PR with a matching head; this is reported explicitly because the worktree may still be in use. The default branch must come from origin/HEAD unless explicitly supplied. A worktree is removed when its HEAD is an ancestor of that branch, when its local HEAD is an ancestor of a merged GitHub PR head with a reachable merge commit, or when all of its commits are patch-equivalent to the default branch, or when its complete aggregate net patch from the merge base is present in the default tree, or when its same-repository closed PR has the same head branch and its local head matches or precedes the PR head. A closed PR is not merge evidence; local cleanup requires its matching same-repository refs/pull/PR_NUMBER/head recovery ref to remain available, so another local ref is not required; an open PR protects its branch. Local branches not checked out in any worktree follow the same cleanup rules. Remote branches are never deleted.\n`)
 }
 
 type RunOptions = {
@@ -601,7 +601,7 @@ async function openWorktreeRegistrationEntry(registrationPath: string) {
   }
 }
 
-async function acquireInitialRegistrationFences(repo: string, eligibleRoot: string | null) {
+async function acquireInitialRegistrationFences(repo: string) {
   const commonDirResult = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   if (!commonDirResult.ok || !path.isAbsolute(commonDirResult.stdout.trim())) {
     return {
@@ -611,21 +611,13 @@ async function acquireInitialRegistrationFences(repo: string, eligibleRoot: stri
         : `git common directory is not absolute: ${commonDirResult.stdout.trim() || '<empty>'}`,
     }
   }
-  if (!eligibleRoot) return { ok: true, fences: new Map(), allowedRoot: null, release: async () => ({ ok: true }) }
-  let allowedRoot: string
-  try {
-    allowedRoot = await fs.realpath(eligibleRoot)
-  } catch (error) {
-    return { ok: false, error: `eligible worktree root query failed: ${errorText(error)}` }
-  }
-  if (allowedRoot !== eligibleRoot) return { ok: false, error: `eligible worktree root identity changed: ${allowedRoot} != ${eligibleRoot}` }
   const registrationRoot = path.join(commonDirResult.stdout.trim(), 'worktrees')
   let entries
   try {
     entries = await fs.readdir(registrationRoot, { withFileTypes: true })
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
-    if (code === 'ENOENT') return { ok: true, fences: new Map(), allowedRoot, release: async () => ({ ok: true }) }
+    if (code === 'ENOENT') return { ok: true, fences: new Map(), release: async () => ({ ok: true }) }
     return { ok: false, error: `worktree registration directory query failed: ${errorText(error)}` }
   }
 
@@ -684,10 +676,6 @@ async function acquireInitialRegistrationFences(repo: string, eligibleRoot: stri
       const releasedResult = await release()
       return { ok: false, error: `${registration.error}${releasedResult.ok ? '' : `; ${releasedResult.error}`}` }
     }
-    if (!isWithin(registration.realWorktreePath, allowedRoot)) {
-      await (registration as any).entryHandle.close()
-      continue
-    }
     const candidate = path.resolve(registration.worktreePath)
     if (fences.has(candidate)) {
       const releasedResult = await release()
@@ -725,7 +713,7 @@ async function acquireInitialRegistrationFences(repo: string, eligibleRoot: stri
     const realCandidate = path.resolve(registration.realWorktreePath)
     if (realCandidate !== candidate) fences.set(realCandidate, state)
   }
-  return { ok: true, fences, allowedRoot, release }
+  return { ok: true, fences, release }
 }
 
 function errorText(error) {
@@ -954,7 +942,7 @@ function parseWorktrees(output: string) {
 
 // The prepared ref transaction protects refs, not the pathname of a worktree registration.
 // Re-read registration, filesystem identity, HEAD, and branch immediately before removal.
-async function inspectWorktreeIdentity(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, allowedRoot: string, expectedRegistration: any, expectedLockReason: string | null = null) {
+async function inspectWorktreeIdentity(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, expectedLockReason: string | null = null) {
   const resolvedPath = path.resolve(worktreePath)
   const listingArgs = ['worktree', 'list', '--porcelain', '-z']
   const listing = git(repo, listingArgs)
@@ -978,7 +966,6 @@ async function inspectWorktreeIdentity(repo: string, worktreePath: string, expec
     issues.push(`quarantine realpath failed before removal: ${errorText(error)}`)
   }
   if (realPath !== resolvedPath) issues.push(`quarantine path changed before removal: ${realPath || '<missing>'}`)
-  if (realPath && !isWithin(realPath, allowedRoot)) issues.push(`quarantine path escaped allowed root before removal: ${realPath}`)
   const head = git(worktreePath, ['rev-parse', '--verify', 'HEAD'])
   if (!head.ok || head.stdout.trim() !== expectedHead) issues.push(!head.ok ? commandDiagnostic('git', ['-C', worktreePath, 'rev-parse', '--verify', 'HEAD'], head) : `worktree HEAD changed before removal: ${head.stdout.trim()} != ${expectedHead}`)
   const branch = git(worktreePath, ['symbolic-ref', '-q', 'HEAD'])
@@ -998,7 +985,7 @@ async function inspectWorktreeIdentity(repo: string, worktreePath: string, expec
 // replace the registration while this lock is held. A single `--force` also
 // respects it; the cleanup's double-force is used only after all dirty-state
 // checks have passed because Git otherwise refuses to remove a locked tree.
-async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, allowedRoot: string, expectedRegistration: any, existingLockReason: string | null = null) {
+async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: string, expectedHead: string, expectedBranchRef: string, expectedRegistration: any, existingLockReason: string | null = null) {
   let acquiredHere = false
   let lockArgs = null
   if (existingLockReason === null) {
@@ -1007,7 +994,7 @@ async function verifyWorktreeIdentityBeforeRemove(repo: string, worktreePath: st
     if (!locked.ok) return { ok: false, error: commandDiagnostic('git', ['-C', repo, ...lockArgs], locked) }
     acquiredHere = true
   }
-  const identity = await inspectWorktreeIdentity(repo, worktreePath, expectedHead, expectedBranchRef, allowedRoot, expectedRegistration, existingLockReason)
+  const identity = await inspectWorktreeIdentity(repo, worktreePath, expectedHead, expectedBranchRef, expectedRegistration, existingLockReason)
   if (identity.ok) return { ok: true, registrationLocked: true }
   const unlockArgs = ['worktree', 'unlock', worktreePath]
   const unlocked = acquiredHere ? git(repo, unlockArgs) : { ok: true }
@@ -1399,27 +1386,6 @@ async function discoverRepos(root: string, explicitRepos: string[]) {
     }
   }
   return [...new Set(reposByCommonDir.values())].sort()
-}
-
-async function resolveEligibleWorktreeRoot(repo: string, managedRoot: string | null) {
-  if (managedRoot) {
-    try {
-      return { ok: true, path: await fs.realpath(managedRoot) }
-    } catch (error) {
-      return { ok: false, path: null, error: `managed worktree root query failed: ${errorText(error)}` }
-    }
-  }
-
-  const localRoot = path.join(repo, '.worktree')
-  try {
-    const realLocalRoot = await fs.realpath(localRoot)
-    if (!isWithin(realLocalRoot, repo)) return { ok: false, path: null, error: `eligible worktree root escapes repository: ${realLocalRoot}` }
-    return { ok: true, path: realLocalRoot }
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
-    if (code === 'ENOENT') return { ok: true, path: null }
-    return { ok: false, path: null, error: `eligible worktree root query failed: ${errorText(error)}` }
-  }
 }
 
 function defaultBranch(repo, explicitName = null) {
@@ -2018,15 +1984,15 @@ async function resolveCleanupEvidence(
   return { ok: true, evidence: null } as const satisfies CleanupEvidenceResolution
 }
 
-async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null, managedRoot: string | null) {
+async function inspectRepository(repo: string, apply: boolean, explicitDefaultBranch: string | null) {
   const realRepo = await fs.realpath(repo)
-  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, managedRoot)
+  if (!apply) return inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
   const lock = await acquireCleanupLock(realRepo)
   if (!lock.ok) return [{ repo: realRepo, action: 'error', reason: lock.code, detail: lock.error }]
   let results = []
   let inspectionError = null
   try {
-    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch, managedRoot)
+    results = await inspectRepositoryUnderLock(realRepo, apply, explicitDefaultBranch)
   } catch (error) {
     inspectionError = error
   }
@@ -2039,12 +2005,10 @@ async function inspectRepository(repo: string, apply: boolean, explicitDefaultBr
   return results
 }
 
-async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, explicitDefaultBranch: string | null, managedRoot: string | null) {
+async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, explicitDefaultBranch: string | null) {
   const results: any[] = []
-  const eligibleRoot = await resolveEligibleWorktreeRoot(realRepo, managedRoot)
-  if (!eligibleRoot.ok) return [{ repo: realRepo, action: 'error', reason: 'eligible-worktree-root-query-failed', detail: eligibleRoot.error }]
-  const realAllowedRoot = eligibleRoot.path
-  const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo, realAllowedRoot) : { ok: true, fences: new Map(), allowedRoot: realAllowedRoot, release: async () => ({ ok: true }) }
+  // 探索rootはrepositoryの発見にだけ使い、cleanup候補はGit登録済みworktreeから取得する。
+  const initialFences: any = apply ? await acquireInitialRegistrationFences(realRepo) : { ok: true, fences: new Map(), release: async () => ({ ok: true }) }
   if (!initialFences.ok) return [{ repo: realRepo, action: 'error', reason: 'worktree-registration-fence-failed', detail: initialFences.error }]
   const listing = git(realRepo, ['worktree', 'list', '--porcelain', '-z'])
   if (!listing.ok) {
@@ -2069,7 +2033,10 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       } catch {
         realCandidate = null
       }
-      if (!initialFences.allowedRoot || !realCandidate || !isWithin(realCandidate, initialFences.allowedRoot)) continue
+      if (!realCandidate) {
+        initialRegistrationIdentities.set(candidate, { ok: false, error: 'candidate path could not be resolved before registration fence' })
+        continue
+      }
       const fence = initialFences.fences.get(candidate)
       if (item.locked !== undefined && !fence?.owned) continue
       if (!fence?.owned) {
@@ -2190,10 +2157,6 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       realCandidate = await fs.realpath(candidate)
     } catch (error) {
       results.push({ ...base, action: 'error', reason: 'candidate-realpath-failed', detail: errorText(error) })
-      continue
-    }
-    if (!realAllowedRoot || !isWithin(candidate, realAllowedRoot) || !isWithin(realCandidate, realAllowedRoot)) {
-      results.push({ ...base, action: 'skip', reason: 'outside-managed-worktree-root' })
       continue
     }
     const initialFence = apply ? initialFences.fences.get(candidate) : null
@@ -2334,10 +2297,6 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       continue
     }
     const quarantineParent = path.dirname(realCandidate)
-    if (quarantineParent !== realAllowedRoot && !isWithin(quarantineParent, realAllowedRoot)) {
-      results.push({ ...base, action: 'error', reason: 'quarantine-parent-outside-managed-root', evidence })
-      continue
-    }
     const quarantine = path.join(quarantineParent, `.cleanup-${path.basename(candidate)}-${randomBytes(16).toString('hex')}`)
     const movedToQuarantine = git(realRepo, ['worktree', 'move', '-f', '-f', candidate, quarantine])
     if (!movedToQuarantine.ok) {
@@ -2467,7 +2426,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
     } catch {
       // Reported by the combined post-quarantine identity check below.
     }
-    const quarantineFenceLost = !registeredAfterQuarantine || registeredAfterQuarantine.locked !== INITIAL_REGISTRATION_LOCK_REASON || realQuarantineAfterQuarantine !== path.resolve(quarantine) || !isWithin(realQuarantineAfterQuarantine, realAllowedRoot)
+    const quarantineFenceLost = !registeredAfterQuarantine || registeredAfterQuarantine.locked !== INITIAL_REGISTRATION_LOCK_REASON || realQuarantineAfterQuarantine !== path.resolve(quarantine)
     if (!statusAfterQuarantine.ok || statusAfterQuarantine.stdout.length > 0 || !headAfterQuarantine.ok || headAfterQuarantine.stdout.trim() !== item.head || !branchAfterQuarantine.ok || branchAfterQuarantine.stdout.trim() !== item.branchRef || !refAfterQuarantine.ok || refAfterQuarantine.stdout.trim() !== item.head || !defaultAfterQuarantine.ok || defaultAfterQuarantine.stdout.trim() !== defaultHead || quarantineFenceLost) {
       if (quarantineFenceLost) registrationFenceFailure = true
       const restored = await restoreQuarantine()
@@ -2566,7 +2525,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
         registrationFenceFailure = true
         postCleanIssues.push('quarantine worktree registration changed or lost the initial identity fence after ignored cleanup')
       }
-      if (realQuarantineAfterClean !== path.resolve(quarantine) || !isWithin(realQuarantineAfterClean, realAllowedRoot)) postCleanIssues.push(`quarantine path changed after ignored cleanup: ${realQuarantineAfterClean || '<missing>'}`)
+      if (realQuarantineAfterClean !== path.resolve(quarantine)) postCleanIssues.push(`quarantine path changed after ignored cleanup: ${realQuarantineAfterClean || '<missing>'}`)
       if (!remoteAfterClean.ok || remoteAfterClean.oid !== defaultHead) postCleanIssues.push(remoteAfterClean.ok ? `remote default changed after ignored cleanup: ${remoteAfterClean.oid} != ${defaultHead}` : remoteAfterClean.error)
       if (!mergeEvidenceAfterClean) postCleanIssues.push('merge evidence is no longer valid after ignored cleanup')
       if (postCleanIssues.length > 0) {
@@ -2596,7 +2555,7 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
       const acquiredLocks = await acquireWorktreeLocks([{ path: quarantine }], ['HEAD', 'index'])
       if (!acquiredLocks.ok) return { ok: false, reason: 'worktree-content-lock-failed', error: acquiredLocks.error }
       contentLocks = acquiredLocks
-      const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', realAllowedRoot, registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
+      const identity = await verifyWorktreeIdentityBeforeRemove(realRepo, quarantine, item.head || '', item.branchRef || '', registrationBeforeQuarantine, INITIAL_REGISTRATION_LOCK_REASON)
       if (!identity.ok) {
         const released = await releaseContentLocks()
         if (!released.ok) {
@@ -2992,8 +2951,7 @@ async function main() {
 
   const repos = await discoverRepos(root, explicitRepos)
   const results: Array<{ action: string; reason?: string; repo?: string; path?: string; severity?: string; [key: string]: unknown }> = []
-  const managedRoot = values.root || config.configuredRoot || null
-  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch, managedRoot))
+  for (const repo of repos) results.push(...await inspectRepository(repo, apply, explicitDefaultBranch))
   const summary = {
     mode: apply ? 'apply' : 'dry-run',
     root,
