@@ -1702,7 +1702,8 @@ function validatePullList(pulls: unknown, oidLength: number): PullListValidation
 }
 
 function queryPullRequests(target: string, oidLength: number, limit: number, headBranch: string | null = null): PullRequestQuery {
-  const args = ['pr', 'list', '--repo', target, '--state', 'all', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
+  // 他者のPR由来のブランチやworktreeは再取得可能なため、認証中ユーザー自身のPRだけを証拠・保護対象にする。
+  const args = ['pr', 'list', '--repo', target, '--author', '@me', '--state', 'all', '--limit', String(limit), '--json', PULL_REQUEST_FIELDS]
   if (headBranch) args.push('--head', headBranch)
   const response = run('gh', args, { timeout: 120_000 })
   if (!response.ok) return { ok: false, code: 'github-query-failed', error: (response.stderr || response.error || '').trim() }

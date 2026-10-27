@@ -2916,6 +2916,7 @@ test('deletes merged local branches that have no worktree and skips unmerged one
     git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/checked-out'])
     const calls = await ghCalls(ghLog)
     assert.equal(calls.length, 2)
+    assert.ok(calls.every((call) => /--author @me(?: |$)/.test(call)), JSON.stringify(calls))
     assert.match(calls[1], /--head feature/)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
