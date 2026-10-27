@@ -229,15 +229,29 @@ test('removes a clean merged worktree and its local branch in apply mode', async
   }
 })
 
-test('cleans a clean merged linked worktree outside the repository when it is under the managed root', async () => {
-  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-managed-root-'))
+test('cleans a clean merged linked worktree outside the discovery root', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-discovery-root-'))
+  const externalWorktree = path.join(path.dirname(fixtureRoot), `${path.basename(fixtureRoot)}-repo-feature`)
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const head = git(worktree, ['rev-parse', 'HEAD']).stdout.trim()
     mergeCandidateIntoMain(repo)
-    const externalWorktree = path.join(fixtureRoot, 'repo-feature')
+    const mergeCommit = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
     git(repo, ['worktree', 'move', worktree, externalWorktree])
     const fakeBin = path.join(fixtureRoot, 'bin')
     await mkdir(fakeBin, { recursive: true })
+    const ghLog = path.join(fixtureRoot, 'gh.log')
+    await writeLoggingGh(fakeBin, ghLog, [{
+      number: 31,
+      url: 'https://github.com/owner/repo/pull/31',
+      state: 'MERGED',
+      mergedAt: '2026-10-20T00:00:00Z',
+      headRefName: 'feature',
+      headRefOid: head,
+      baseRefName: 'main',
+      headRepository: { nameWithOwner: 'owner/repo' },
+      mergeCommit: { oid: mergeCommit },
+    }])
     const fakeDocker = path.join(fakeBin, 'docker')
     await writeFile(fakeDocker, '#!/bin/sh\n[ "$1" = "ps" ] && exit 0\nprintf "%s\\n" "unexpected docker command" >&2\nexit 99\n')
     await chmod(fakeDocker, 0o755)
@@ -252,7 +266,7 @@ test('cleans a clean merged linked worktree outside the repository when it is un
     assert.equal(dryRun.status, 0, dryRun.stderr || dryRun.stdout || dryRun.error || 'process did not start')
     const drySummary = JSON.parse(dryRun.stdout)
     assert.equal(drySummary.repositories_checked, 1)
-    assert.equal(drySummary.would_delete, 1)
+    assert.equal(drySummary.would_delete, 1, JSON.stringify(drySummary, null, 2))
     assert.equal(drySummary.results[0].action, 'would-delete')
     assert.equal(drySummary.results[0].path, externalWorktree)
     assert.equal(existsSync(externalWorktree), true)
@@ -266,6 +280,7 @@ test('cleans a clean merged linked worktree outside the repository when it is un
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 1)
     assert.doesNotMatch(git(repo, ['worktree', 'list', '--porcelain']).stdout, /repo-feature/)
   } finally {
+    await rm(externalWorktree, { recursive: true, force: true })
     await rm(fixtureRoot, { recursive: true, force: true })
   }
 })
@@ -867,24 +882,20 @@ test('checks for new process use immediately before final worktree removal', { s
   }
 })
 
-test('keeps a clean merged worktree outside the managed root', async () => {
-  const parent = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-outside-managed-root-'))
-  const fixtureRoot = path.join(parent, 'managed')
+test('cron reports a clean linked worktree outside the discovery root when merge evidence is missing', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-outside-discovery-root-'))
+  const fixtureRoot = path.join(parent, 'discovery-root')
   try {
     await mkdir(fixtureRoot)
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
-    mergeCandidateIntoMain(repo)
     const externalWorktree = path.join(parent, 'outside-worktree')
     git(repo, ['worktree', 'move', worktree, externalWorktree])
 
-    const result = run(entrypoint, ['--repo', repo, '--root', fixtureRoot, '--json'], {
+    const result = run(cronEntrypoint, [], {
       env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
     })
     assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
-    const summary = JSON.parse(result.stdout)
-    assert.equal(summary.would_delete, 0)
-    assert.equal(summary.results[0].action, 'skip')
-    assert.equal(summary.results[0].reason, 'outside-managed-worktree-root')
+    assert.ok(result.stdout.includes(`- skip: ${externalWorktree} — merge-evidence-not-found`), result.stdout)
     assert.equal(existsSync(externalWorktree), true)
     assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
   } finally {
@@ -2798,6 +2809,12 @@ test('cron wrapper applies the same prune-first contract without arguments', asy
   }
 })
 
+test('cleanup help clarifies that root only controls repository discovery', () => {
+  const help = run(entrypoint, ['--help'])
+  assert.equal(help.status, 0, help.stderr || help.stdout || help.error || 'process did not start')
+  assert.match(help.stdout, /--root and GIT_REPOSITORIES_ROOT only control repository discovery/)
+})
+
 test('cron wrapper has a side-effect-free help path and rejects arguments', () => {
   const help = run(cronEntrypoint, ['--help'])
   assert.equal(help.status, 0, help.stderr || help.stdout || help.error || 'process did not start')
@@ -2889,7 +2906,7 @@ async function ghCalls(logPath) {
 
 test('deletes merged local branches that have no worktree and skips unmerged ones', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-unattached-'))
-  const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-outside-managed-root-'))
+  const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-outside-discovery-root-'))
   try {
     const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
     // The upstream lags behind the merged local branch, which `git branch -d` would refuse.
