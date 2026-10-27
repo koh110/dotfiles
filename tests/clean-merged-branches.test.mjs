@@ -367,6 +367,25 @@ test('cron removes a clean merged-PR worktree even while a process is using it',
   }
 })
 
+test('cron reports a clean worktree kept without merge evidence', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-unmerged-skip-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'cron cleanup should keep a worktree without merge evidence')
+    assert.ok(result.stdout.includes(`- skip: ${worktree} — merge-evidence-not-found`), result.stdout)
+    assert.equal(existsSync(worktree), true)
+    assert.equal(run('git', ['-C', repo, 'show-ref', '--verify', '--quiet', 'refs/heads/feature']).status, 0)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
 test('keeps process-use checking when the matching merged PR head is ahead of the worktree', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-pr-head-ahead-in-use-'))
   let activeProcess
@@ -2916,6 +2935,7 @@ test('deletes merged local branches that have no worktree and skips unmerged one
     git(repo, ['show-ref', '--verify', '--quiet', 'refs/heads/checked-out'])
     const calls = await ghCalls(ghLog)
     assert.equal(calls.length, 2)
+    assert.ok(calls.every((call) => /--author @me(?: |$)/.test(call)), JSON.stringify(calls))
     assert.match(calls[1], /--head feature/)
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true })
