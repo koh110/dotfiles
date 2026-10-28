@@ -3,6 +3,7 @@ import { platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isWSL } from './wsl.ts'
+import { deployLayeredZsh } from './zsh-layer.ts'
 
 const REPO_DIR = fileURLToPath(new URL('..', import.meta.url))
 const TEMPLATE_DIR = join(REPO_DIR, 'templates', 'files')
@@ -18,7 +19,6 @@ function detectEnvironment() {
 
   return 'linux'
 }
-
 
 function templateCandidates(path: string) {
   const environment = detectEnvironment()
@@ -69,6 +69,16 @@ function applyAdditionalLines(base: string, additional: string) {
 }
 
 export async function deployDotfile(path: string, targetPath: string) {
+  if (path === '.zshrc') {
+    await deployLayeredZsh('rc', targetPath)
+    return
+  }
+
+  if (path === '.zshenv') {
+    await deployLayeredZsh('env', targetPath)
+    return
+  }
+
   const templatePath = await findExistingTemplate(path)
   await mkdir(dirname(targetPath), { recursive: true })
 

@@ -26,18 +26,6 @@ export LSCOLORS=gxfxcxdxbxegedabagacag
 export LS_COLORS='di=36;40:ln=35;40:so=32;40:pi=33;40:ex=31;40:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=30;46'
 
 zstyle ':completion:*:default' list-colors ${(s.:.)LS_COLORS}
-# lsがカラー表示になるようエイリアスを設定
-case "${OSTYPE}" in
-darwin*)
-  # Mac
-  alias ls="ls -GF"
-  ;;
-linux*)
-  # Linux
-  alias ls='ls -F --color'
-  ;;
-esac
-
 # history
 HISTFILE=~/.zsh_history
 HISTSIZE=1000000
