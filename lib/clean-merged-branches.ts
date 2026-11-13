@@ -1300,6 +1300,12 @@ function readDefaultWorktreeSnapshot(repo: string, expectedPath: string, expecte
   return { ok: true, worktrees: currentWorktrees }
 }
 
+function isRejectedFetchRefUpdate(stdout: string, destinationRef: string) {
+  const match = stdout.match(/^! (\S+) (\S+) (\S+)\r?\n?$/)
+  if (!match || match[3] !== destinationRef) return false
+  return isGitObjectId(match[1]) && isGitObjectId(match[2])
+}
+
 async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
   const defaultBranchRef = `refs/heads/${defaultInfo.name}`
   const defaultWorktree = worktrees.find((item) => item.branchRef === defaultBranchRef)
@@ -1337,11 +1343,17 @@ async function refreshDefaultBranchBeforeCleanup(repo, worktrees, defaultInfo) {
   // an existing worktree here: the repository lock cannot fence an unrelated
   // checkout, so a concurrent branch switch could otherwise mutate the wrong
   // branch. The dedicated refresh job remains responsible for worktree rebase.
-  const args = ['fetch', '--no-tags', 'origin', `refs/heads/${defaultInfo.name}:refs/remotes/origin/${defaultInfo.name}`]
+  const destinationRef = `refs/remotes/origin/${defaultInfo.name}`
+  const args = ['fetch', '--porcelain', '--no-tags', 'origin', `refs/heads/${defaultInfo.name}:${destinationRef}`]
   const fetched = git(repo, args, { timeout: 120_000 })
-  return fetched.ok
-    ? { ok: true, refreshed: true, mode: 'fetch' }
-    : { ok: false, code: 'default-branch-refresh-failed', error: commandDiagnostic('git', ['-C', repo, ...args], fetched) }
+  if (fetched.ok) return { ok: true, refreshed: true, mode: 'fetch' }
+  const error = commandDiagnostic('git', ['-C', repo, ...args], fetched)
+  return fetched.status === 1
+    && !fetched.error
+    && fetched.stderr === ''
+    && isRejectedFetchRefUpdate(fetched.stdout, destinationRef)
+    ? { ok: false, code: 'default-branch-ref-update-rejected', error }
+    : { ok: false, code: 'default-branch-refresh-failed', error }
 }
 
 function worktreeRegistrationResult(repo, item, action, detail = item.prunable) {
@@ -2201,7 +2213,13 @@ async function inspectRepositoryUnderLock(realRepo: string, apply: boolean, expl
   let dirtyRefresh: any = null
   if (apply) {
     const refreshed = await refreshDefaultBranchBeforeCleanup(realRepo, worktrees, defaultInfo)
-    if (!refreshed.ok) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status })
+    if (!refreshed.ok) {
+      if (refreshed.code === 'default-branch-ref-update-rejected') {
+        results.push({ repo: realRepo, action: 'skip', severity: 'warn', reason: refreshed.code, detail: refreshed.error })
+        return results
+      }
+      return prerequisiteFailure({ repo: realRepo, action: 'error', reason: refreshed.code, detail: refreshed.error, dirty_status: refreshed.dirty_status })
+    }
     dirtyRefresh = refreshed
     defaultInfo = defaultBranch(realRepo, explicitDefaultBranch)
     if (!defaultInfo) return prerequisiteFailure({ repo: realRepo, action: 'error', reason: 'default-branch-not-found-after-refresh' })
@@ -3017,6 +3035,7 @@ function hasDirtyConflict(item: { dirty_status?: string }) {
 
 function cronCause(item) {
   if (isDefaultBranchWorktreeDirty(item)) return 'default branchのworktreeに未コミットの変更または未追跡ファイルがあります'
+  if (item.reason === 'default-branch-ref-update-rejected') return 'default branchのremote-tracking ref更新が拒否されたため、このrepositoryのcleanupを見送りました'
   if (item.reason === 'stale-origin-tracking-ref') return 'origin上で削除済みのbranchに対応するlocal tracking refです'
   if (item.reason === 'dirty') return '対象worktreeに未commit変更があります'
   if (item.reason === 'locked') return `対象worktreeがロックされています${item.detail ? `: ${item.detail}` : ''}`
@@ -3034,6 +3053,7 @@ function cronNextStep(item) {
   if (item.reason === 'worktree-process-check-unavailable') return `processの使用状況を確認できなかったため削除をskipしました。${processNextAction(item.reason)}`
   if (item.reason === 'worktree-in-use') return processNextAction(item.reason)
   if (item.reason === 'worktree-process-check-failed') return processNextAction(item.reason)
+  if (item.reason === 'default-branch-ref-update-rejected') return '表示されたremote-tracking refの旧/新OIDとdefault branchの履歴を確認し、安全に同期してから再実行してください'
   if (isDefaultBranchWorktreeDirty(item)) {
     if (hasDirtyConflict(item)) return '競合を解消するか、進行中のmergeまたはrebaseをabortしてから、必要な変更をcommitまたは退避し、worktreeをcleanにして再実行してください'
     return '検出された変更内容を確認し、不要なキャッシュや生成物はリポジトリ外へ移動または削除し、必要な変更はcommitまたは退避して、worktreeをcleanにしてから再実行してください'
