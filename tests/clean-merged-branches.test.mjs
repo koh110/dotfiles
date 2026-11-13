@@ -2419,6 +2419,176 @@ exec '${realGit}' \"$@\"
   }
 })
 
+test('reports a rejected default-branch fetch ref update as a warned cron skip', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-default-fetch-rejected-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const base = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    await writeFile(path.join(repo, 'local-main.txt'), 'local main\n')
+    git(repo, ['add', 'local-main.txt'])
+    git(repo, ['commit', '-qm', 'local main side'])
+    const localHead = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+    const baseTree = git(repo, ['rev-parse', `${base}^{tree}`]).stdout.trim()
+    const remoteHead = git(repo, ['commit-tree', baseTree, '-p', base, '-m', 'remote main side']).stdout.trim()
+    assert.equal(git(repo, ['rev-parse', `${remoteHead}^{tree}`]).stdout.trim(), baseTree)
+    git(repo, ['push', '-q', '--force', 'origin', `${remoteHead}:refs/heads/main`])
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+
+    const result = run(cronEntrypoint, [], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- warn: .* — default-branch-ref-update-rejected/)
+    assert.match(result.stdout, new RegExp(`stdout=! ${localHead} ${remoteHead} refs/remotes/origin/main`))
+    assert.match(result.stdout, /警告: 1 \/ エラー: 0/)
+    assert.doesNotMatch(result.stdout, /- error:/)
+    assert.equal(git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim(), localHead)
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), localHead)
+    assert.ok(existsSync(worktree))
+    assert.ok(git(repo, ['worktree', 'list', '--porcelain']).stdout.includes(`worktree ${worktree}`))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps whitespace-only fetch stderr fatal when porcelain reports a rejected ref update', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-default-fetch-whitespace-stderr-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const base = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    await writeFile(path.join(repo, 'local-main.txt'), 'local main\n')
+    git(repo, ['add', 'local-main.txt'])
+    git(repo, ['commit', '-qm', 'local main side'])
+    const localHead = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+    const baseTree = git(repo, ['rev-parse', `${base}^{tree}`]).stdout.trim()
+    const remoteHead = git(repo, ['commit-tree', baseTree, '-p', base, '-m', 'remote main side']).stdout.trim()
+    assert.equal(git(repo, ['rev-parse', `${remoteHead}^{tree}`]).stdout.trim(), baseTree)
+    git(repo, ['push', '-q', '--force', 'origin', `${remoteHead}:refs/heads/main`])
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "fetch" ]; then
+    "$CLEANUP_TEST_REAL_GIT" "$@"
+    result=$?
+    if [ "$result" -eq 1 ]; then printf ' \\n' >&2; fi
+    exit "$result"
+  fi
+done
+exec "$CLEANUP_TEST_REAL_GIT" "$@"
+`)
+    await chmod(fakeGit, 0o755)
+
+    assert.ok(path.isAbsolute(realGit))
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        CLEANUP_TEST_REAL_GIT: realGit,
+        PATH: [fakeBin, path.dirname(process.execPath), '/usr/bin', '/bin', '/usr/local/bin'].join(path.delimiter),
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- error: .* — default-branch-refresh-failed/)
+    assert.doesNotMatch(result.stdout, /default-branch-ref-update-rejected/)
+    assert.ok(existsSync(worktree))
+    assert.equal(git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim(), localHead)
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), localHead)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('preserves registration-fence release failures when default-branch fetch is rejected', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-default-fetch-fence-release-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    const base = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    await writeFile(path.join(repo, 'local-main.txt'), 'local main\n')
+    git(repo, ['add', 'local-main.txt'])
+    git(repo, ['commit', '-qm', 'local main side'])
+    const localHead = git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim()
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+    const baseTree = git(repo, ['rev-parse', `${base}^{tree}`]).stdout.trim()
+    const remoteHead = git(repo, ['commit-tree', baseTree, '-p', base, '-m', 'remote main side']).stdout.trim()
+    assert.equal(git(repo, ['rev-parse', `${remoteHead}^{tree}`]).stdout.trim(), baseTree)
+    git(repo, ['push', '-q', '--force', 'origin', `${remoteHead}:refs/heads/main`])
+    git(repo, ['update-ref', 'refs/remotes/origin/main', localHead])
+
+    const worktreeGitdir = (await readFile(path.join(worktree, '.git'), 'utf8')).trim().replace(/^gitdir: /, '')
+    assert.ok(path.isAbsolute(worktreeGitdir))
+    const initialFenceLock = path.join(path.resolve(worktree, worktreeGitdir), 'locked')
+    assert.equal(existsSync(initialFenceLock), false)
+    const fakeBin = path.join(fixtureRoot, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    const realGit = must(run('which', ['git']), 'which git').stdout.trim()
+    const fakeGit = path.join(fakeBin, 'git')
+    await writeFile(fakeGit, `#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "fetch" ]; then
+    "$CLEANUP_TEST_REAL_GIT" "$@"
+    result=$?
+    if [ "$result" -eq 1 ]; then
+      [ -f "$CLEANUP_TEST_INITIAL_FENCE_LOCK" ] || exit 92
+      rm -f "$CLEANUP_TEST_INITIAL_FENCE_LOCK" || exit 93
+      printf '%s\\n' 'replacement lock from test' > "$CLEANUP_TEST_INITIAL_FENCE_LOCK" || exit 94
+    fi
+    exit "$result"
+  fi
+done
+exec "$CLEANUP_TEST_REAL_GIT" "$@"
+`)
+    await chmod(fakeGit, 0o755)
+
+    assert.ok(path.isAbsolute(realGit))
+    const result = run(cronEntrypoint, [], {
+      env: {
+        GIT_REPOSITORIES_ROOT: fixtureRoot,
+        CLEANUP_TEST_REAL_GIT: realGit,
+        CLEANUP_TEST_INITIAL_FENCE_LOCK: initialFenceLock,
+        PATH: [fakeBin, path.dirname(process.execPath), '/usr/bin', '/bin', '/usr/local/bin'].join(path.delimiter),
+      },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- warn: .* — default-branch-ref-update-rejected/)
+    assert.match(result.stdout, /- error: .* — worktree-registration-fence-release-failed/)
+    assert.match(result.stdout, /initial registration lock identity changed before release/)
+    assert.ok(existsSync(worktree))
+    assert.equal(git(repo, ['rev-parse', 'refs/heads/main']).stdout.trim(), localHead)
+    assert.equal(git(repo, ['rev-parse', 'refs/remotes/origin/main']).stdout.trim(), localHead)
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps non-rejected default-branch fetch failures fatal', async () => {
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-default-fetch-failed-'))
+  try {
+    const { repo, worktree } = await makeRemoteCandidateRepo(fixtureRoot)
+    git(repo, ['remote', 'set-url', 'origin', path.join(fixtureRoot, 'missing-origin.git')])
+
+    const result = run(entrypoint, ['--apply', '--cron', '--default-branch', 'main'], {
+      env: { GIT_REPOSITORIES_ROOT: fixtureRoot },
+    })
+
+    assert.equal(result.status, 1, result.stderr || result.stdout || result.error || 'process did not start')
+    assert.match(result.stdout, /- error: .* — default-branch-refresh-failed/)
+    assert.match(result.stdout, /does not appear to be a git repository/)
+    assert.doesNotMatch(result.stdout, /default-branch-ref-update-rejected/)
+    assert.ok(existsSync(worktree))
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true })
+  }
+})
+
 test('keeps a dirty default-branch preflight error when remote metadata fails', async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'clean-merged-worktrees-cron-dirty-remote-error-'))
   try {
